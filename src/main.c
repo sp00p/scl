@@ -2,6 +2,82 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct ConditionCodes {
+    uint8_t z:1;
+    uint8_t s:1;
+    uint8_t p:1;
+    uint8_t cy:1;
+    uint8_t ac:1;
+    uint8_t pad:3;
+} ConditionCodes;
+
+typedef struct State {
+    uint8_t a;
+    uint8_t b;
+    uint8_t c;
+    uint8_t d;
+    uint8_t e;
+    uint8_t h;
+    uint8_t l;
+    uint16_t sp;
+    uint16_t pc;
+    uint8_t *memory;
+    struct ConditionCodes cc;
+    uint8_t int_enable;
+} State;
+
+void unimplementedInstruction(State* state) {
+    printf("Unimplemented instruction\n");
+    exit(1);
+}
+
+void Emulate8080(State* state) {
+
+    unsigned char *opcode = &state->memory[state->pc];
+    
+    switch(*opcode) {
+        case 0x00: break; // NOP
+        case 0x01:        // LXI    B,word
+                state->c = opcode[1];
+                state->b = opcode[2];
+                state->pc += 2; // advance 2 bytes
+                break;
+        case 0x02: unimplementedInstruction(state); break;
+        case 0x03: unimplementedInstruction(state); break;
+        case 0x04: unimplementedInstruction(state); break;
+        case 0x05:
+                {
+                    uint8_t res = state->b - 1;
+                    state->cc.z = (res == 0);
+                    state->cc.s = (0x80 == (res & 0x80));
+                    state->cc.p = parity(res, 8);
+                    state->b = res;
+                }
+                break;
+        case 0x06:
+                state->b = opcode[1];
+                state->pc++;
+                break;
+        case 0x07: unimplementedInstruction(state); break;
+        case 0x08: unimplementedInstruction(state); break;
+        case 0x09:
+                {
+                    uint32_t hl = (state->h << 8) | state->l;
+                    uint32_t bc = (state->b << 8) | state->c;
+                    uint32_t res = hl + bc;
+                    state->h = (res & 0xff00) >> 8;
+                    state->l = res & 0xff;
+                    state->cc.cy = ((res & 0xffff0000) > 0);
+                }
+                break;
+        /*...*/
+        case 0x41: state->b = state->c; break; // MOV B,C
+        case 0x42: state->b = state->d; break; // MOV B,D
+        case 0x43: state->b = state->e; break; // MOV B,E
+    }
+    state->pc+=1; // for opcode
+}
+
 int dissassemble(unsigned char *buffer, int pc) {
     unsigned char *code = &buffer[pc];
     int opbytes = 1;
