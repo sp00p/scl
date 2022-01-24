@@ -41,7 +41,7 @@ int dissassemble(unsigned char *buffer, int pc) {
         case 0x1f: printf("RAR"); break;
         case 0x20: printf("NOP"); break;
         case 0x21: printf("LXI    H,#$%02x%02x", code[2], code[1]); opbytes=3; break;
-        case 0x22: printf("SHLD    $%02x%02x", code[2], code[1]); opbytes=3; break
+        case 0x22: printf("SHLD    $%02x%02x", code[2], code[1]); opbytes=3; break;
         case 0x23: printf("INX    H"); break;
         case 0x24: printf("INR    H"); break;
         case 0x25: printf("DCR    H"); break;
@@ -69,7 +69,7 @@ int dissassemble(unsigned char *buffer, int pc) {
         case 0x3b: printf("DCX    SP"); break;
         case 0x3c: printf("INR    A"); break;
         case 0x3d: printf("DCR    A"); break;
-        case 0x3e: printf("MVI    A,#0x%02x", code[1]); opbytes=2; break;
+        case 0x3e: printf("MVI    A,#$%02x", code[1]); opbytes=2; break;
         case 0x3f: printf("CMC"); break;
         case 0x40: printf("MOV    B,B"); break;
         case 0x41: printf("MOV    B,C"); break;
@@ -250,7 +250,7 @@ int dissassemble(unsigned char *buffer, int pc) {
         case 0xf1: printf("POP    PSW"); break;
         case 0xf2: printf("JP    $%02x%02x", code[2], code[1]); opbytes = 3; break;
         case 0xf3: printf("DI"); break;
-        case 0xf4: printf("CP    $02x%02x", code[2], code[1]); opbytes = 3; break;
+        case 0xf4: printf("CP    $%02x%02x", code[2], code[1]); opbytes = 3; break;
         case 0xf5: printf("PUSH    PSW"); break;
         case 0xf6: printf("ORI    $%02x", code[1]); opbytes = 2; break;
         case 0xf7: printf("RST    6"); break;
@@ -258,9 +258,9 @@ int dissassemble(unsigned char *buffer, int pc) {
         case 0xf9: printf("SPHL"); break;
         case 0xfa: printf("JM    $%02x%02x", code[2], code[1]); opbytes = 3; break;
         case 0xfb: printf("EI"); break;
-        case 0xfc: printf("CM    $%02x%02x", code[2], code[1]) opbytes = 3 break;
+        case 0xfc: printf("CM    $%02x%02x", code[2], code[1]); opbytes = 3; break;
         case 0xfd: printf("NOP"); break;
-        case 0xfe: printf("CPI    $%02x", code[1]); opbytes = 2; break;
+        case 0xfe: printf("CPI    $#%02x", code[1]); opbytes = 2; break;
         case 0xff: printf("RST    7"); break;
     }
 
