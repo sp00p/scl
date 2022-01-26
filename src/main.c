@@ -31,6 +31,16 @@ void unimplementedInstruction(State* state) {
     exit(1);
 }
 
+int parity(int x, int size) {
+    int i;
+    int p = 0;
+    x = (x & ((1 << size) - 1));
+    for (i = 0; i < size; i++) {
+        if (x & 0x1) p++;
+        x = x >> 1;
+    }
+    return (0 == (p & 0x1));
+}
 void Emulate8080(State* state) {
 
     unsigned char *opcode = &state->memory[state->pc];
@@ -45,7 +55,7 @@ void Emulate8080(State* state) {
         case 0x02: unimplementedInstruction(state); break;
         case 0x03: unimplementedInstruction(state); break;
         case 0x04: unimplementedInstruction(state); break;
-        case 0x05:
+        case 0x05: // DCR B
                 {
                     uint8_t res = state->b - 1;
                     state->cc.z = (res == 0);
@@ -54,13 +64,13 @@ void Emulate8080(State* state) {
                     state->b = res;
                 }
                 break;
-        case 0x06:
+        case 0x06: // MVI B,byte
                 state->b = opcode[1];
                 state->pc++;
                 break;
         case 0x07: unimplementedInstruction(state); break;
         case 0x08: unimplementedInstruction(state); break;
-        case 0x09:
+        case 0x09: // DAD B
                 {
                     uint32_t hl = (state->h << 8) | state->l;
                     uint32_t bc = (state->b << 8) | state->c;
@@ -73,7 +83,7 @@ void Emulate8080(State* state) {
         case 0x0a: unimplementedInstruction(state); break;
         case 0x0b: unimplementedInstruction(state); break;
         case 0x0c: unimplementedInstruction(state); break;
-        case 0x0d:
+        case 0x0d: //DCR C
                 {
                 uint32_t hl = (state->h << 8) | state->l;
                 uint32_t bc = (state->b << 8) | state->c;
@@ -82,6 +92,67 @@ void Emulate8080(State* state) {
                 state->l = res & 0xff;
                 state->cc.cy = ((res & 0xffff0000) > 0);
                 }
+                break;
+        case 0x0e: //MVI C, byte
+                state->c = opcode[1];
+                state->pc++;
+                break;
+        case 0x0f: //RRC
+                {
+                    uint8_t x = state->a;
+                    state->a = ((x & 1) << 7) | (x >> 1);
+                    state->cc.cy = (1 == (x & 1));
+                }
+                break;
+        case 0x10: unimplementedInstruction(state); break;
+        case 0x11: //LXI D,word
+                state->e = opcode[1];
+                state->d = opcode[2];
+                state->pc += 2;
+                break;
+        case 0x12: unimplementedInstruction(state); break;
+        case 0x13: //INX D
+                state->e++;
+                if (state->e == 0)
+                    state->d++;
+                break;
+        case 0x14: unimplementedInstruction(state); break;
+        case 0x15: unimplementedInstruction(state); break;
+        case 0x16: unimplementedInstruction(state); break;
+        case 0x17: unimplementedInstruction(state); break;
+        case 0x18: unimplementedInstruction(state); break;
+        case 0x19: // DAD D
+                {
+                uint32_t hl = (state->h << 8) | state->l;
+                uint32_t de = (state->d << 8) | state->e;
+                uint32_t res = hl + de;
+                state->h = (res & 0xff00) >> 8;
+                state->l = res & 0xff;
+                state->cc.cy = ((res & 0xffff0000) != 0);
+                }
+                break;
+        case 0x1a: // LDAX D
+                {
+                uint16_t offset = (state->d << 8) | state->e;
+                state->a = state->memory[offset];
+                }
+                break;
+        case 0x1b: unimplementedInstruction(state); break;
+        case 0x1c: unimplementedInstruction(state); break;
+        case 0x1d: unimplementedInstruction(state); break;
+        case 0x1e: unimplementedInstruction(state); break;
+        case 0x1f: unimplementedInstruction(state); break;
+        case 0x20: unimplementedInstruction(state); break;
+        case 0x21:
+                state->l = opcode[1];
+                state->h = opcode[2];
+                state->pc += 2;
+                break;
+        case 0x22: unimplementedInstruction(state); break;
+        case 0x23:
+                state->l++;
+                if (state->l == 0)
+                    state->h++;
                 break;
         case 0x41: state->b = state->c; break; // MOV B,C
         case 0x42: state->b = state->d; break; // MOV B,D
