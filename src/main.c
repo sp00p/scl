@@ -70,7 +70,19 @@ void Emulate8080(State* state) {
                     state->cc.cy = ((res & 0xffff0000) > 0);
                 }
                 break;
-        /*...*/
+        case 0x0a: unimplementedInstruction(state); break;
+        case 0x0b: unimplementedInstruction(state); break;
+        case 0x0c: unimplementedInstruction(state); break;
+        case 0x0d:
+                {
+                uint32_t hl = (state->h << 8) | state->l;
+                uint32_t bc = (state->b << 8) | state->c;
+                uint32_t res = hl + bc;
+                state->h = (res & 0xff00) >> 8;
+                state->l = res & 0xff;
+                state->cc.cy = ((res & 0xffff0000) > 0);
+                }
+                break;
         case 0x41: state->b = state->c; break; // MOV B,C
         case 0x42: state->b = state->d; break; // MOV B,D
         case 0x43: state->b = state->e; break; // MOV B,E
