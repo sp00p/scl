@@ -143,17 +143,54 @@ void Emulate8080(State* state) {
         case 0x1e: unimplementedInstruction(state); break;
         case 0x1f: unimplementedInstruction(state); break;
         case 0x20: unimplementedInstruction(state); break;
-        case 0x21:
+        case 0x21:          // LXI    H,word
                 state->l = opcode[1];
                 state->h = opcode[2];
                 state->pc += 2;
                 break;
         case 0x22: unimplementedInstruction(state); break;
-        case 0x23:
+        case 0x23:        // INX    H
                 state->l++;
                 if (state->l == 0)
                     state->h++;
                 break;
+        case 0x24: unimplementedInstruction(state); break;
+        case 0x25: unimplementedInstruction(state); break;
+        case 0x26:        // MVI H,byte
+                state->h = opcode[1];
+                state->pc++;
+                break;
+        case 0x27: unimplementedInstruction(state); break;
+        case 0x28: unimplementedInstruction(state); break;
+        case 0x29:        // DAD    H
+                {
+                uint32_t hl = (state->h << 8) | state->l;
+                uint32_t res = hl + hl;
+                state->h = (res & 0xff00) >> 8;
+                state->l = res & 0xff;
+                state->cc.cy = ((res & 0xffff0000) != 0);
+                }
+                break;
+        case 0x2a: unimplementedInstruction(state); break;
+        case 0x2b: unimplementedInstruction(state); break;
+        case 0x2c: unimplementedInstruction(state); break;
+        case 0x2d: unimplementedInstruction(state); break;
+        case 0x2e: unimplementedInstruction(state); break;
+        case 0x2f: unimplementedInstruction(state); break;
+        case 0x30: unimplementedInstruction(state); break;
+        case 0x31:        // LXI    SP,word
+                state->sp = (opcode[2] << 8) | opcode[1];
+                state->pc += 2;
+                break;
+        case 0x32:        // STA    (word)
+                {
+                uint16_t offset = (opcode[2] << 8) | (opcode[1]);
+                state->memory[offset] = state->a;
+                state->pc += 2;
+                }
+                break;
+        case 0x33: unimplementedInstruction(state); break;
+        case 0x34: unimplementedInstruction(state); break;
         case 0x41: state->b = state->c; break; // MOV B,C
         case 0x42: state->b = state->d; break; // MOV B,D
         case 0x43: state->b = state->e; break; // MOV B,E
