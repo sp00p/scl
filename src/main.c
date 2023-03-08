@@ -21,6 +21,7 @@ uint8_t delay_timer;
 uint8_t sound_timer;
 uint32_t last_sound_decrement_time;
 uint32_t last_delay_decrement_time;
+uint32_t last_cycle_time;
 uint8_t sp;
 uint8_t x;
 uint8_t y;
@@ -440,6 +441,15 @@ int main(int argc, char* argv[]) {
             }
         }
         SDL_RenderPresent(renderer);
+
+        uint32_t current_time = SDL_GetTicks();
+        uint32_t cycle_duration = current_time - last_cycle_time;
+
+        if (cycle_duration < (1000 / 60)) {
+            SDL_Delay((1000 / 60) - cycle_duration);
+        }
+
+        last_cycle_time = current_time;
     }
 
     SDL_DestroyRenderer(renderer);
