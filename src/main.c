@@ -400,14 +400,6 @@ void emulate() {
                 printf("not implemented\n");
                 break;
     }
-
-    if (delay_timer > 0) {
-        delay_timer--;
-    }
-
-    if (sound_timer > 0) {
-        sound_timer--;
-    }
 }
 
 int main(int argc, char* argv[]) {
