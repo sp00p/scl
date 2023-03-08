@@ -19,6 +19,8 @@ uint16_t I;
 uint16_t pc;
 uint8_t delay_timer;
 uint8_t sound_timer;
+uint32_t last_sound_decrement_time;
+uint32_t last_delay_decrement_time;
 uint8_t sp;
 uint8_t x;
 uint8_t y;
@@ -28,6 +30,8 @@ uint8_t keys[NUM_KEYS];
 
 SDL_Window* window;
 SDL_Renderer* renderer;
+Mix_Chunk *beep;
+
 
 int keymap[NUM_KEYS] = {
     SDLK_1, SDLK_2, SDLK_3, SDLK_4,
@@ -117,10 +121,39 @@ int InitSDL() {
         return 1;
     }
 
+    if(Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        printf("Failed to initialize SDL Mixer! SDL_Error: %s\n", SDL_GetError());
+        return 1;
+    } else {
+        beep = Mix_LoadWAV("assets/beep.wav");
+        if (!beep) {
+            printf("Failed to find the beep.wav file. Does it exist?");
+            return 1;
+        }
+    }
+
     return 0;
 }
 
 void emulate() {
+
+    uint32_t current_time = SDL_GetTicks();
+
+    if(delay_timer > 0) {
+        if(current_time - last_delay_decrement_time >= 1000 / 60) {
+            delay_timer--;
+            last_delay_decrement_time = current_time;
+        }
+    }
+
+    if (sound_timer > 0) {
+        if (current_time - last_sound_decrement_time >= 1000 / 60) {
+            sound_timer--;
+            last_sound_decrement_time = current_time;
+            Mix_PlayChannel(-1, beep, 0); // play a beep sound
+        }
+    }
+
     uint16_t opcode = memory[pc] << 8 | memory[pc + 1];
 
     // decode opcode and execute instruction
@@ -137,7 +170,7 @@ void emulate() {
                     pc += 2;
                     break;
                 default:
-                    printf("not implemented yet: %c\n", opcode);
+                    printf("not implemented yet\n");
                     pc += 2;
                     break;
                 }
