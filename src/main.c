@@ -25,6 +25,7 @@ uint32_t last_cycle_time;
 uint8_t sp;
 uint8_t x;
 uint8_t y;
+uint8_t sprite_speed = 0;
 uint16_t stack[STACK_SIZE];
 uint8_t screen[SCREEN_WIDTH * SCREEN_HEIGHT];
 uint8_t keys[NUM_KEYS];
@@ -32,6 +33,8 @@ uint8_t keys[NUM_KEYS];
 SDL_Window* window;
 SDL_Renderer* renderer;
 Mix_Chunk *beep;
+
+void print_mem();
 
 
 int keymap[NUM_KEYS] = {
@@ -60,18 +63,17 @@ const uint8_t fontset[FONTSET_SIZE] = {
     0xF0, 0x80, 0xF0, 0x80, 0x80  // F
 };
 
-
-void load_rom(const char* filename) {
+void load_rom(const char* filename, bool print_memory, bool testing) {
     // open rom file
     FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Failed to load ROM file! Does it exist?");
+    if (!file && testing == 0) {
+        printf("Failed to load ROM file! Does it exist?\n");
         return;
     }
 
     // for testing
     // tests 1-3 work, no user input yet! :(
-    memory[0x1FF] = 1;
+    //memory[0x1FF] = 1;
 
     // get file size
     fseek(file, 0, SEEK_END);
@@ -84,19 +86,50 @@ void load_rom(const char* filename) {
     // close file
     fclose(file);
 
-    printf("loaded rom to memory\n");
+    printf("Memory Initialized B)\n");
 
+    if (print_memory) {
+        print_mem();
+    }
+
+
+}
+
+void run_tests(char* test_num) {
+    uint8_t test = (uint8_t)atoi(test_num);
+    printf("Test being run: %d\n", test);
+    memory[0x1FF] = test;
+    load_rom("../tests/chip8-test-suite.ch8", false, true);
+    printf("\n\nRunning Tests....\n");
+}
+
+void print_mem() {
     printf("================\n");
     printf("     Memory     \n");
     printf("================\n");
 
-    for (int i = 0; i < sizeof(memory); i++) {
-        printf("%c ", memory[i]);
-        if ((i + 1) % 5 == 0) {
-            printf("\n");
+    for (int i = 0; i < MEMORY_SIZE; i += 16) {
+        printf("%04X: ", i);
+        for (int j = 0; j < 16; j++) {
+            if (i + j < MEMORY_SIZE) {
+                printf("%02X ", memory[i + j]);
+            } else {
+                printf("   ");
+            }
         }
 
+        printf("| ");
+        for (int j = 0; j < 16; j++) {
+            if (i + j < MEMORY_SIZE && isprint(memory[i + j])) {
+                printf("%c", memory[i + j]);
+            } else {
+                printf(".");
+            }
+        }
+
+        printf("\n");
     }
+
 }
 
 int InitSDL() {
@@ -106,22 +139,25 @@ int InitSDL() {
     }
 
     // create window
-    printf("creating window...\n");
+    printf("Creating Window...\n");
     window = SDL_CreateWindow("SCL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH * 10, SCREEN_HEIGHT * 10, SDL_WINDOW_SHOWN);
 
     if (!window) {
         printf("Failed to create window! SDL_Error: %s\n", SDL_GetError());
         return 1;
     }
+    printf("Done\n");
 
     // create renderer
-    printf("creating renderer...\n");
+    printf("Creating Renderer...\n");
     renderer = SDL_CreateRenderer(window, -1, 0);
     if (!renderer) {
         printf("Failed to create renderer! SDL_Error: %s\n", SDL_GetError());
         return 1;
     }
+    printf("Done.\n");
 
+    printf("Initializing audio...");
     if(Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
         printf("Failed to initialize SDL Mixer! SDL_Error: %s\n", SDL_GetError());
         return 1;
@@ -131,6 +167,7 @@ int InitSDL() {
             printf("Failed to find the beep.wav file. Does it exist?");
             return 1;
         }
+        printf("Done.\n");
     }
 
     return 0;
@@ -138,6 +175,7 @@ int InitSDL() {
 
 void emulate() {
 
+    // Sound handling
     uint32_t current_time = SDL_GetTicks();
 
     if(delay_timer > 0) {
@@ -155,6 +193,8 @@ void emulate() {
         }
     }
 
+
+
     uint16_t opcode = memory[pc] << 8 | memory[pc + 1];
 
     // decode opcode and execute instruction
@@ -171,7 +211,7 @@ void emulate() {
                     pc += 2;
                     break;
                 default:
-                    printf("not implemented yet\n");
+                    //printf("not implemented yet\n");
                     pc += 2;
                     break;
                 }
@@ -269,7 +309,7 @@ void emulate() {
                         pc += 2;
                         break;
                     default:
-                        printf("not implemented (0x8000)\n");
+                        //printf("not implemented (0x8000)\n");
                         break;
                     }
                     break;
@@ -331,7 +371,7 @@ void emulate() {
                         }
                         break;
                     default:
-                        printf("not implemented (0xE000)\n");
+                        //printf("not implemented (0xE000)\n");
                         break;
                     }
                     break;
@@ -393,12 +433,12 @@ void emulate() {
                     pc += 2;
                     break;
                 default:
-                    printf("not implemented (0xF000)\n");
+                    //printf("not implemented (0xF000)\n");
                     break;
                 }
                 break;
             default:
-                printf("not implemented\n");
+                //printf("not implemented\n");
                 break;
     }
 }
@@ -408,12 +448,26 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (argc != 2) {
-        printf("Usage: scl <rom file>\n");
+    if (argc < 2 || argc > 5) {
+        printf("Usage: ./scl [-t] [1-5] [-p] <rom>");
         return 1;
     }
 
-   load_rom(argv[1]);
+    if (strcmp(argv[1], "-p") == 0 && strcmp(argv[2], "-t") == 0) {
+        printf("Usage ./scl [-t] [1-5] [-p] <rom>");
+        return 1;
+    }
+
+    if (argc == 3 && strcmp(argv[1], "-t") == 0) {
+        run_tests(argv[2]); // ./scl -t [1-5]
+    } else if (argc == 2 && strcmp(argv[1], "-t") == 1 && strcmp(argv[1], "-p") == 1) { // ./scl <rom>
+        load_rom(argv[1], false, false);
+    } else if (argc == 3 && strcmp(argv[1], "-p") == 0) { // ./scl -p <rom>
+        load_rom(argv[2], true, false);
+    }else {
+        printf("Usage ./scl [-t] [1-5] [-p] <rom>");
+        return 1;
+    }
 
     bool quit = false;
 
@@ -452,6 +506,8 @@ int main(int argc, char* argv[]) {
         last_cycle_time = current_time;
     }
 
+    Mix_CloseAudio();
+    Mix_Quit();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
