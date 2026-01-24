@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: scl-windows
+            ext: .zip
+          - os: ubuntu-latest
+            artifact: scl-linux
+            ext: .tar.gz
+          - os: macos-latest
+            artifact: scl-macos
+            ext: .tar.gz
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install Dependencies (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxext-dev
+    
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+    
+    - name: Build
+      run: cmake --build build --config Release
+    
+    - name: Package (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path release
+        Copy-Item build/Release/scl.exe release/
+        Copy-Item -Recurse build/Release/assets release/
+        Copy-Item README.md release/
+        Copy-Item LICENSE release/
+        Copy-Item -Recurse docs release/
+        Compress-Archive -Path release/* -DestinationPath ${{ matrix.artifact }}${{ matrix.ext }}
+    
+    - name: Package (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        mkdir -p release
+        cp build/scl release/
+        cp README.md LICENSE release/
+        cp -r docs release/
+        tar -czvf ${{ matrix.artifact }}${{ matrix.ext }} -C release .
+    
+    - name: Upload Release Asset
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact }}
+        path: ${{ matrix.artifact }}${{ matrix.ext }}
+
+  create-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/scl-windows/*
+          artifacts/scl-linux/*
+          artifacts/scl-macos/*
+        generate_release_notes: true

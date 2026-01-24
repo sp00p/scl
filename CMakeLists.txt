@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(chip8 LANGUAGES C CXX)
+project(scl LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,7 +22,7 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
 )
 
-add_executable(chip8
+add_executable(scl
     src/main.cpp
     src/emulator/chip8.cpp
     src/emulator/debug_ui.cpp
@@ -40,10 +40,33 @@ add_executable(chip8
     ${IMGUI_SOURCES}
 )
 
-target_include_directories(chip8 PRIVATE
+target_include_directories(scl PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
 )
 
-target_link_libraries(chip8 PRIVATE SDL2-static SDL2main)
+target_link_libraries(scl PRIVATE SDL2-static SDL2main)
+
+# Copy assets to build directory
+add_custom_command(TARGET scl POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:scl>/assets
+)
+
+# Tests
+enable_testing()
+
+# GoogleTest
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
+
+add_executable(test_lexer tests/test_lexer.cpp src/compiler/lexer.cpp src/compiler/error_handler.cpp)
+target_include_directories(test_lexer PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_lexer PRIVATE gtest gtest_main)
+add_test(NAME test_lexer COMMAND test_lexer)
+
+add_executable(test_parser tests/test_parser.cpp src/compiler/lexer.cpp src/compiler/parser.cpp src/compiler/error_handler.cpp)
+target_include_directories(test_parser PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_parser PRIVATE gtest gtest_main)
+add_test(NAME test_parser COMMAND test_parser)
