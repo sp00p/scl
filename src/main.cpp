@@ -8,13 +8,15 @@
 
 #include <chip8/emulator.h>
 #include <chip8/compiler/compiler.h>
+#include <chip8/disassembler.h>
 #include <iostream>
 #include <string>
 
 void print_usage(const char* program_name) {
     std::cerr << "Usage:\n"
               << "  " << program_name << " run <rom_file>              - Run a CHIP-8 ROM\n"
-              << "  " << program_name << " compile <source> <output>   - Compile SCL to CHIP-8\n";
+              << "  " << program_name << " compile <source> <output>   - Compile SCL to CHIP-8\n"
+              << "  " << program_name << " disasm <rom_file> [output]  - Disassemble a CHIP-8 ROM\n";
 }
 
 int run_compiler(const std::string& source_file, const std::string& output_file, bool debug) {
@@ -100,6 +102,14 @@ int main(int argc, char* argv[]) {
         }
         bool debug = (argc > 4 && std::string(argv[4]) == "--debug");
         return run_compiler(argv[2], argv[3], debug);
+    } else if (command == "disasm") {
+        if (argc < 3) {
+            std::cerr << "Error: ROM file required for 'disasm' command\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+        std::string output = (argc > 3) ? argv[3] : "-";
+        return chip8::runDisassembler(argv[2], output);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
         print_usage(argv[0]);
