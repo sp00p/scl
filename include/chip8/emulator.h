@@ -57,4 +57,10 @@ private:
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* texture = nullptr;
     std::array<uint32_t, SCREEN_WIDTH * SCREEN_HEIGHT> pixel_buffer{};
+
+    SDL_AudioDeviceID audio_device = 0;
+    int audio_phase = 0;
+
+    void setupAudio();
+    static void audioCallback(void* userdata, Uint8* stream, int len);
 };

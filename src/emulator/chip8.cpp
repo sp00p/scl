@@ -32,7 +32,7 @@ const std::array<uint8_t, 80> Chip8::FONTSET = {
 };
 
 Chip8::Chip8() : gen(rd()), dis(0, 255) {
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
         throw std::runtime_error("SDL initialization failed: " + std::string(SDL_GetError()));
     }
 
@@ -54,10 +54,12 @@ Chip8::Chip8() : gen(rd()), dis(0, 255) {
         throw std::runtime_error("Texture creation failed: " + std::string(SDL_GetError()));
     }
 
+    setupAudio();
     reset();
 }
 
 Chip8::~Chip8() {
+    SDL_CloseAudioDevice(audio_device);
     if (texture) SDL_DestroyTexture(texture);
     if (renderer) SDL_DestroyRenderer(renderer);
     if (window) SDL_DestroyWindow(window);
@@ -323,4 +325,41 @@ void Chip8::render() {
     }
 
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+}
+
+void Chip8::setupAudio() {
+    SDL_AudioSpec want, have;
+    SDL_zero(want);
+    want.freq = 44100;
+    want.format = AUDIO_S16SYS;
+    want.channels = 1;
+    want.samples = 2048;
+    want.userdata = this;
+    want.callback = audioCallback;
+
+    audio_device = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    if (audio_device == 0) {
+        throw std::runtime_error("Failed to open audio device: " + std::string(SDL_GetError()));
+    }
+    SDL_PauseAudioDevice(audio_device, 0);
+}
+
+void Chip8::audioCallback(void* userdata, Uint8* stream, int len) {
+    auto* self = static_cast<Chip8*>(userdata);
+    auto* buffer = reinterpret_cast<Sint16*>(stream);
+    int samples = len / static_cast<int>(sizeof(Sint16));
+
+    if (!self || self->sound_timer == 0) {
+        std::memset(stream, 0, len);
+        return;
+    }
+
+    const int sample_rate = 44100;
+    const int freq = 440;  // 440 Hz square wave
+    int period = sample_rate / freq;
+
+    for (int i = 0; i < samples; ++i) {
+        buffer[i] = ((self->audio_phase % period) < (period / 2)) ? 6000 : -6000;
+        self->audio_phase++;
+    }
 }
