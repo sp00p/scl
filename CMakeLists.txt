@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
-project(chip8 LANGUAGES CXX)
+project(chip8 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# SDL2 setup
-set(SDL2_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
-set(SDL2_LIB_DIR ${CMAKE_SOURCE_DIR}/lib)
+# Build SDL2 from submodule
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/SDL2 EXCLUDE_FROM_ALL)
 
 # ImGui sources
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
@@ -40,10 +42,8 @@ add_executable(chip8
 
 target_include_directories(chip8 PRIVATE
     ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/include/SDL2
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
 )
 
-target_link_directories(chip8 PRIVATE ${SDL2_LIB_DIR})
-target_link_libraries(chip8 SDL2 SDL2main)
+target_link_libraries(chip8 PRIVATE SDL2-static SDL2main)
