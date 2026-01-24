@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <SDL2/SDL.h>
 #include <array>
 #include <cstdint>
 #include <random>
@@ -17,6 +18,9 @@ class Chip8 {
 public:
     static constexpr int SCREEN_WIDTH = 64;
     static constexpr int SCREEN_HEIGHT = 32;
+    static constexpr int SCALE = 10;
+    static constexpr int WINDOW_WIDTH = SCREEN_WIDTH * SCALE;
+    static constexpr int WINDOW_HEIGHT = SCREEN_HEIGHT * SCALE;
     static const std::array<uint8_t, 80> FONTSET;
 
     std::array<uint8_t, 4096> memory{};
@@ -28,19 +32,29 @@ public:
     uint8_t delay_timer = 0;
     uint8_t sound_timer = 0;
 
-    std::array<uint8_t, 64 * 32> display{};
-    std::array<bool, 16> keys{};
-    bool draw_flag = false;
-
     Chip8();
     ~Chip8();
 
     void reset();
     void loadROM(const std::string& filename);
     void emulateCycle();
+    void handleInput(SDL_Event& event);
+    void render();
+
+    SDL_Window* getWindow() { return window; }
+    SDL_Renderer* getRenderer() { return renderer; }
 
 private:
+    std::array<uint8_t, SCREEN_WIDTH * SCREEN_HEIGHT> display{};
+    std::array<bool, 16> keys{};
+    bool draw_flag = false;
+
     std::random_device rd;
     std::mt19937 gen;
     std::uniform_int_distribution<> dis;
+
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    SDL_Texture* texture = nullptr;
+    std::array<uint32_t, SCREEN_WIDTH * SCREEN_HEIGHT> pixel_buffer{};
 };

@@ -7,8 +7,10 @@
  */
 
 #include <chip8/emulator.h>
+#include <chip8/keyboard_map.h>
 #include <fstream>
 #include <stdexcept>
+#include <cstring>
 
 const std::array<uint8_t, 80> Chip8::FONTSET = {
     0xF0, 0x90, 0x90, 0x90, 0xF0,  // 0
@@ -30,10 +32,36 @@ const std::array<uint8_t, 80> Chip8::FONTSET = {
 };
 
 Chip8::Chip8() : gen(rd()), dis(0, 255) {
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        throw std::runtime_error("SDL initialization failed: " + std::string(SDL_GetError()));
+    }
+
+    window = SDL_CreateWindow("CHIP-8 Emulator",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_SHOWN);
+    if (!window) {
+        throw std::runtime_error("Window creation failed: " + std::string(SDL_GetError()));
+    }
+
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer) {
+        throw std::runtime_error("Renderer creation failed: " + std::string(SDL_GetError()));
+    }
+
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+        SDL_TEXTUREACCESS_STREAMING, SCREEN_WIDTH, SCREEN_HEIGHT);
+    if (!texture) {
+        throw std::runtime_error("Texture creation failed: " + std::string(SDL_GetError()));
+    }
+
     reset();
 }
 
 Chip8::~Chip8() {
+    if (texture) SDL_DestroyTexture(texture);
+    if (renderer) SDL_DestroyRenderer(renderer);
+    if (window) SDL_DestroyWindow(window);
+    SDL_Quit();
 }
 
 void Chip8::reset() {
@@ -266,4 +294,33 @@ void Chip8::emulateCycle() {
             }
             break;
     }
+}
+
+void Chip8::handleInput(SDL_Event& event) {
+    if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+        bool pressed = (event.type == SDL_KEYDOWN);
+        auto it = chip8::keyboard::KEY_MAP.find(event.key.keysym.sym);
+        if (it != chip8::keyboard::KEY_MAP.end()) {
+            keys[it->second] = pressed;
+        }
+    }
+}
+
+void Chip8::render() {
+    if (draw_flag) {
+        const uint32_t on = 0xFFFFFFFF;   // white
+        const uint32_t off = 0x000000FF;  // black
+
+        for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+            for (int x = 0; x < SCREEN_WIDTH; ++x) {
+                pixel_buffer[y * SCREEN_WIDTH + x] = display[y * SCREEN_WIDTH + x] ? on : off;
+            }
+        }
+
+        SDL_UpdateTexture(texture, nullptr, pixel_buffer.data(),
+            SCREEN_WIDTH * static_cast<int>(sizeof(uint32_t)));
+        draw_flag = false;
+    }
+
+    SDL_RenderCopy(renderer, texture, nullptr, nullptr);
 }
