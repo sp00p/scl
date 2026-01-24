@@ -10,10 +10,13 @@
 
 #include <array>
 #include <cstdint>
+#include <random>
 #include <string>
 
 class Chip8 {
 public:
+    static constexpr int SCREEN_WIDTH = 64;
+    static constexpr int SCREEN_HEIGHT = 32;
     static const std::array<uint8_t, 80> FONTSET;
 
     std::array<uint8_t, 4096> memory{};
@@ -25,9 +28,19 @@ public:
     uint8_t delay_timer = 0;
     uint8_t sound_timer = 0;
 
+    std::array<uint8_t, 64 * 32> display{};
+    std::array<bool, 16> keys{};
+    bool draw_flag = false;
+
     Chip8();
     ~Chip8();
 
     void reset();
     void loadROM(const std::string& filename);
+    void emulateCycle();
+
+private:
+    std::random_device rd;
+    std::mt19937 gen;
+    std::uniform_int_distribution<> dis;
 };
