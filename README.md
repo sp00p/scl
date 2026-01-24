@@ -1,15 +1,100 @@
-# SCL - CHIP-8 Emulator and Compiler
+# SCL
 
-A CHIP-8 emulator, debugger, and compiler for the SCL (Simple CHIP-8 Language).
+CHIP-8 emulator, debugger, and compiler. Write games in a C-like language and run them on a fully-featured emulator with step-through debugging.
+
+## What's Included
+
+**Emulator** — Runs CHIP-8 and Super CHIP-8 ROMs with configurable quirks for maximum compatibility. Includes sound, 60Hz timing, and customizable key bindings.
+
+**Debugger** — ImGui-based debug window with conditional breakpoints, watch expressions, memory editor, register view, live disassembly, stack inspection, and source mapping.
+
+**Compiler** — The SCL language compiles to CHIP-8 bytecode. Supports functions, arrays, control flow, inline assembly, and generates source maps for debugging.
+
+**Disassembler** — Converts ROM files back to readable assembly with basic code flow analysis.
+
+**Decompiler** — Analyzes ROM structure and generates pseudo-code with detected functions, loops, and control flow.
 
 ## Building
 
+Requires CMake 3.16+ and a C++17 compiler. SDL2 is included as a submodule.
+
 ```bash
+git clone --recurse-submodules https://github.com/user/scl.git
+cd scl
 mkdir build && cd build
 cmake ..
-cmake --build .
+cmake --build . --config Release
 ```
+
+If you cloned without `--recurse-submodules`:
+```bash
+git submodule update --init --recursive
+```
+
+## Quick Start
+
+```bash
+# Run a ROM
+scl run tetris.ch8
+
+# Debug a ROM (opens debugger window)
+scl debug tetris.ch8
+
+# Compile SCL source to ROM
+scl compile game.scl game.ch8
+
+# Disassemble a ROM
+scl disasm game.ch8
+
+# Decompile a ROM to pseudo-code
+scl decompile game.ch8
+
+# Enable Super CHIP-8 mode (128x64, scroll ops, 16x16 sprites)
+scl run schip_game.ch8 --schip
+```
+
+## Keyboard
+
+```
+CHIP-8     Keyboard
+1 2 3 C    1 2 3 4
+4 5 6 D    Q W E R
+7 8 9 E    A S D F
+A 0 B F    Z X C V
+```
+
+Debugger: **F5** run/pause, **F6** reset, **F10** step.
+
+## Example
+
+A simple program that moves a sprite with WASD:
+
+```c
+sprite ball[3] = { 0xE0, 0xE0, 0xE0 };
+
+void main() {
+    byte x = 32;
+    byte y = 16;
+    
+    while (1) {
+        clear;
+        if (key(5)) { y = y - 1; }  // W
+        if (key(8)) { y = y + 1; }  // S
+        if (key(7)) { x = x - 1; }  // A
+        if (key(9)) { x = x + 1; }  // D
+        draw(x, y, 3, ball);
+        wait(16);
+    }
+}
+```
+
+See [docs/SCL.md](docs/SCL.md) for the full language reference.
+
+## Docs
+
+- [SCL Language Reference](docs/SCL.md)
+- [Emulator Details](docs/EMULATOR.md)
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT
