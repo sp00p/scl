@@ -1,0 +1,72 @@
+{
+  "name": "scl-language",
+  "displayName": "SCL Language Support",
+  "description": "Syntax highlighting, diagnostics, and language support for SCL (CHIP-8 scripting language)",
+  "version": "1.0.0",
+  "publisher": "scl",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:scl"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "scl",
+        "aliases": [
+          "SCL",
+          "scl"
+        ],
+        "extensions": [
+          ".scl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "scl",
+        "scopeName": "source.scl",
+        "path": "./syntaxes/scl.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "SCL",
+      "properties": {
+        "scl.compilerPath": {
+          "type": "string",
+          "default": "scl",
+          "description": "Path to the SCL compiler executable"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/scl"
+  },
+  "keywords": [
+    "scl",
+    "chip8",
+    "chip-8",
+    "emulator",
+    "syntax highlighting",
+    "language server"
+  ]
+}
