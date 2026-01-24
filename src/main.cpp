@@ -7,12 +7,26 @@
  */
 
 #include <chip8/emulator.h>
+#include <chip8/compiler/compiler.h>
 #include <iostream>
 #include <string>
 
 void print_usage(const char* program_name) {
     std::cerr << "Usage:\n"
-              << "  " << program_name << " run <rom_file>  - Run a CHIP-8 ROM\n";
+              << "  " << program_name << " run <rom_file>              - Run a CHIP-8 ROM\n"
+              << "  " << program_name << " compile <source> <output>   - Compile SCL to CHIP-8\n";
+}
+
+int run_compiler(const std::string& source_file, const std::string& output_file, bool debug) {
+    try {
+        chip8::compiler::Compiler compiler;
+        compiler.setDebugMode(debug);
+        compiler.compile(source_file, output_file);
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Compilation error: " << e.what() << std::endl;
+        return 1;
+    }
 }
 
 int run_emulator(const std::string& rom_file) {
@@ -78,6 +92,14 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return run_emulator(argv[2]);
+    } else if (command == "compile") {
+        if (argc < 4) {
+            std::cerr << "Error: source and output files required for 'compile' command\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+        bool debug = (argc > 4 && std::string(argv[4]) == "--debug");
+        return run_compiler(argv[2], argv[3], debug);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
         print_usage(argv[0]);

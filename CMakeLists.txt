@@ -11,6 +11,11 @@ set(SDL2_LIB_DIR ${CMAKE_SOURCE_DIR}/lib)
 add_executable(chip8
     src/main.cpp
     src/emulator/chip8.cpp
+    src/compiler/lexer.cpp
+    src/compiler/parser.cpp
+    src/compiler/codegen.cpp
+    src/compiler/compiler.cpp
+    src/compiler/error_handler.cpp
 )
 
 target_include_directories(chip8 PRIVATE
