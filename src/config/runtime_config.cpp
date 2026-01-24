@@ -12,6 +12,7 @@
 #else
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <pwd.h>
 #endif
 
@@ -144,7 +145,7 @@ bool RuntimeConfig::save(const std::string& filepath) const {
         return false;
     }
     
-    file << "# SCL 2.0 Configuration File\n\n";
+    file << "# SCL Configuration File\n\n";
     
     file << "[quirks]\n";
     file << "vf_reset = " << (quirks.vf_reset ? "true" : "false") << "\n";
@@ -188,11 +189,11 @@ std::string RuntimeConfig::getDefaultConfigPath() {
 #ifdef _WIN32
     char appdata[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata))) {
-        path = std::string(appdata) + "\\scl2.0\\";
+        path = std::string(appdata) + "\\scl\\";
         CreateDirectoryA(path.c_str(), NULL);
         path += "config.ini";
     } else {
-        path = "scl2.0.ini";
+        path = "scl.ini";
     }
 #else
     const char* home = getenv("HOME");
@@ -201,12 +202,12 @@ std::string RuntimeConfig::getDefaultConfigPath() {
         if (pw) home = pw->pw_dir;
     }
     if (home) {
-        path = std::string(home) + "/.config/scl2.0/";
+        path = std::string(home) + "/.config/scl/";
         // Create directory (ignore errors)
         mkdir(path.c_str(), 0755);
         path += "config.ini";
     } else {
-        path = "scl2.0.ini";
+        path = "scl.ini";
     }
 #endif
     
@@ -215,7 +216,7 @@ std::string RuntimeConfig::getDefaultConfigPath() {
 
 bool RuntimeConfig::loadDefault() {
     // First try current directory
-    if (load("scl2.0.ini")) {
+    if (load("scl.ini")) {
         return true;
     }
     
