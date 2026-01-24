@@ -8,6 +8,12 @@
 
 #include <chip8/emulator.h>
 #include <iostream>
+#include <string>
+
+void print_usage(const char* program_name) {
+    std::cerr << "Usage:\n"
+              << "  " << program_name << " run <rom_file>  - Run a CHIP-8 ROM\n";
+}
 
 int run_emulator(const std::string& rom_file) {
     try {
@@ -25,7 +31,7 @@ int run_emulator(const std::string& rom_file) {
                 if (event.type == SDL_QUIT) {
                     quit = true;
                 }
-                if (event.type == SDL_WINDOWEVENT && 
+                if (event.type == SDL_WINDOWEVENT &&
                     event.window.event == SDL_WINDOWEVENT_CLOSE) {
                     quit = true;
                 }
@@ -51,7 +57,7 @@ int run_emulator(const std::string& rom_file) {
             SDL_Delay(1);
         }
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "Emulator error: " << e.what() << std::endl;
         return 1;
     }
     return 0;
@@ -59,9 +65,22 @@ int run_emulator(const std::string& rom_file) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <rom_file>" << std::endl;
+        print_usage(argv[0]);
         return 1;
     }
 
-    return run_emulator(argv[1]);
+    std::string command = argv[1];
+
+    if (command == "run") {
+        if (argc < 3) {
+            std::cerr << "Error: ROM file required for 'run' command\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+        return run_emulator(argv[2]);
+    } else {
+        std::cerr << "Unknown command: " << command << "\n";
+        print_usage(argv[0]);
+        return 1;
+    }
 }
