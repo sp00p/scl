@@ -16,6 +16,7 @@ add_executable(chip8
     src/compiler/codegen.cpp
     src/compiler/compiler.cpp
     src/compiler/error_handler.cpp
+    src/compiler/source_map.cpp
     src/disassembler/disassembler.cpp
 )
 
