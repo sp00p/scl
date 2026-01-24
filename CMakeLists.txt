@@ -42,6 +42,7 @@ add_executable(scl
 
 target_include_directories(scl PRIVATE
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/third_party/SDL2/include
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
 )
