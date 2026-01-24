@@ -1,5 +1,28 @@
-cmake*
-.idea
+# Build directories
 build/
-.dll
+cmake-build-*/
+out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Compiled
 *.exe
+*.dll
+*.o
+*.obj
+*.a
+*.lib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# OS
+.DS_Store
+Thumbs.db
