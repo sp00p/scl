@@ -2,9 +2,51 @@
 
 SCL (Simple CHIP-8 Language) is a C-like language that compiles to CHIP-8 bytecode.
 
+## Quick Start
+
 ```bash
+# Compile an SCL file to a CHIP-8 ROM
 scl compile game.scl game.ch8
+
+# Run the compiled ROM
 scl run game.ch8
+
+# Compile and run in one step (debug mode)
+scl debug game.scl
+```
+
+## Quick Reference
+
+```c
+// Types
+byte x = 10;              // 8-bit variable (0-255)
+byte arr[10];             // Array
+global byte score;        // Global variable
+const MAX = 100;          // Constant
+
+// Sprites
+sprite ball[3] = { 0xE0, 0xE0, 0xE0 };
+
+// Functions
+void foo() { }            // No return value
+byte bar(byte a) { return a + 1; }
+
+// Control flow
+if (x > 10) { } else { }
+while (x < 100) { x++; }
+for (i = 0; i < 10; i++) { }
+switch (dir) { case 0: y--; case 1: y++; }
+
+// Built-ins
+clear;                    // Clear screen
+draw(x, y, 3, sprite);    // Draw sprite
+drawnum(score, 0, 0);     // Draw number
+key(5)                    // Check key (returns 0/1)
+waitkey()                 // Wait for key press
+wait(16);                 // Delay (~16ms per tick)
+beep(10);                 // Play sound
+rand(0xFF)                // Random 0-255
+collision                 // 1 if last draw collided
 ```
 
 ## Program Structure
@@ -576,3 +618,19 @@ game.scl:42:5: warning: Unreachable code after return/break/continue
 5. **Use constants** - Makes code readable and easy to tune
 6. **Keep functions small** - Reduces register pressure
 7. **Use globals sparingly** - Memory access is slower than registers
+
+## Example Programs
+
+See the `examples/` folder for complete, runnable games:
+
+- **hello.scl** - Basic sprite drawing
+- **animation.scl** - Frame-based animation
+- **pong.scl** - Single-player Pong with paddle physics
+- **snake.scl** - Snake game with food and scoring
+- **breakout.scl** - Brick-breaking game with collision
+
+To run an example:
+```bash
+scl compile examples/snake.scl snake.ch8
+scl run snake.ch8
+```

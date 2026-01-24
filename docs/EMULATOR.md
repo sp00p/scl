@@ -1,9 +1,22 @@
 # Emulator
 
+The SCL emulator runs CHIP-8 and Super CHIP-8 ROMs with full debugging support.
+
+## Quick Start
+
 ```bash
-scl run game.ch8          # normal mode
-scl debug game.ch8        # with debugger
-scl run game.ch8 --schip  # Super CHIP-8 mode
+# Run a ROM
+scl run game.ch8
+
+# Run with debugger
+scl debug game.ch8
+
+# Run in Super CHIP-8 mode (128x64)
+scl run game.ch8 --schip
+
+# Compile and run an SCL program
+scl compile examples/snake.scl snake.ch8
+scl run snake.ch8
 ```
 
 ## Keyboard
@@ -82,4 +95,60 @@ Additional opcodes: `00CN` (scroll down), `00FB/FC` (scroll right/left), `00FD` 
 
 ## Instruction Reference
 
-See [Cowgod's CHIP-8 Technical Reference](http://devernay.free.fr/hacks/chip8/C8TECH10.HTM) for the full opcode list. The emulator implements all 35 original instructions plus SCHIP extensions.
+The emulator implements all 35 original CHIP-8 instructions plus SCHIP extensions.
+
+### Standard CHIP-8 Opcodes
+
+| Opcode | Description |
+|--------|-------------|
+| `00E0` | Clear screen |
+| `00EE` | Return from subroutine |
+| `1NNN` | Jump to address NNN |
+| `2NNN` | Call subroutine at NNN |
+| `3XNN` | Skip if VX == NN |
+| `4XNN` | Skip if VX != NN |
+| `5XY0` | Skip if VX == VY |
+| `6XNN` | Set VX = NN |
+| `7XNN` | Add VX += NN |
+| `8XY0` | Set VX = VY |
+| `8XY1` | Set VX = VX OR VY |
+| `8XY2` | Set VX = VX AND VY |
+| `8XY3` | Set VX = VX XOR VY |
+| `8XY4` | Add VX += VY (VF = carry) |
+| `8XY5` | Sub VX -= VY (VF = !borrow) |
+| `8XY6` | Shift VX >>= 1 (VF = LSB) |
+| `8XY7` | Sub VX = VY - VX (VF = !borrow) |
+| `8XYE` | Shift VX <<= 1 (VF = MSB) |
+| `9XY0` | Skip if VX != VY |
+| `ANNN` | Set I = NNN |
+| `BNNN` | Jump to V0 + NNN |
+| `CXNN` | Random VX = rand() & NN |
+| `DXYN` | Draw sprite at (VX, VY), height N |
+| `EX9E` | Skip if key VX pressed |
+| `EXA1` | Skip if key VX not pressed |
+| `FX07` | Set VX = delay timer |
+| `FX0A` | Wait for key, store in VX |
+| `FX15` | Set delay timer = VX |
+| `FX18` | Set sound timer = VX |
+| `FX1E` | Add I += VX |
+| `FX29` | Set I = font sprite for VX |
+| `FX33` | Store BCD of VX at I |
+| `FX55` | Store V0-VX at I |
+| `FX65` | Load V0-VX from I |
+
+### SCHIP Extensions
+
+| Opcode | Description |
+|--------|-------------|
+| `00CN` | Scroll down N lines |
+| `00FB` | Scroll right 4 pixels |
+| `00FC` | Scroll left 4 pixels |
+| `00FD` | Exit interpreter |
+| `00FE` | Low resolution (64x32) |
+| `00FF` | High resolution (128x64) |
+| `DXY0` | Draw 16x16 sprite |
+| `FX30` | Set I = large font for VX |
+| `FX75` | Store V0-VX in RPL flags |
+| `FX85` | Load V0-VX from RPL flags |
+
+For more details, see [Cowgod's CHIP-8 Technical Reference](http://devernay.free.fr/hacks/chip8/C8TECH10.HTM).
