@@ -1,0 +1,75 @@
+// Pong - Single Player vs Wall
+// Controls: W/S (keys 5/8) to move paddle
+// Demonstrates: functions, collision, game loop
+
+sprite paddle[6] = { 0x80, 0x80, 0x80, 0x80, 0x80, 0x80 };
+sprite ball[2] = { 0xC0, 0xC0 };
+
+byte clamp(byte val, byte min, byte max) {
+    if (val < min) { return min; }
+    if (val > max) { return max; }
+    return val;
+}
+
+void main() {
+    byte px = 2;      // Paddle x (fixed)
+    byte py = 13;     // Paddle y
+    byte bx = 32;     // Ball x
+    byte by = 16;     // Ball y
+    byte dx = 2;      // Ball velocity x
+    byte dy = 1;      // Ball velocity y
+    byte score = 0;
+    
+    while (1) {
+        clear;
+        
+        // Paddle input
+        if (key(5)) { py -= 2; }  // W = up
+        if (key(8)) { py += 2; }  // S = down
+        py = clamp(py, 0, 26);
+        
+        // Ball movement
+        bx += dx;
+        by += dy;
+        
+        // Ball bounce off top/bottom
+        if (by < 1) {
+            by = 1;
+            dy = 0 - dy;
+        }
+        if (by > 29) {
+            by = 29;
+            dy = 0 - dy;
+        }
+        
+        // Ball bounce off right wall
+        if (bx > 60) {
+            bx = 60;
+            dx = 0 - dx;
+            beep(2);
+        }
+        
+        // Ball collision with paddle
+        if (bx < 5) {
+            if (by >= py && by < py + 6) {
+                bx = 5;
+                dx = 0 - dx;
+                score++;
+                beep(4);
+            } else {
+                // Missed - reset ball
+                bx = 32;
+                by = 16;
+                dx = 2;
+                beep(10);
+            }
+        }
+        
+        // Draw
+        draw(px, py, 6, paddle);
+        draw(bx, by, 2, ball);
+        drawnum(score, 28, 0);
+        
+        wait(16);
+    }
+}

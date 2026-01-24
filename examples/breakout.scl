@@ -1,0 +1,96 @@
+// Breakout
+// Controls: A/D (keys 7/9) to move paddle
+// Demonstrates: arrays, collision detection, game state
+
+sprite paddle[1] = { 0xFC };
+sprite ball[1] = { 0xC0 };
+sprite brick[1] = { 0xF0 };
+
+void main() {
+    byte bricks[16];  // 16 bricks (2 rows of 8)
+    byte px = 28;     // Paddle position
+    byte bx = 32;     // Ball x
+    byte by = 20;     // Ball y
+    byte dx = 1;      // Ball velocity x
+    byte dy = 255;    // Ball velocity y (255 = -1 when wrapped)
+    byte score = 0;
+    byte i;
+    byte brickx;
+    byte bricky;
+    
+    // Initialize all bricks as active
+    for (i = 0; i < 16; i++) {
+        bricks[i] = 1;
+    }
+    
+    while (1) {
+        clear;
+        
+        // Paddle input
+        if (key(7)) { px -= 2; }  // A = left
+        if (key(9)) { px += 2; }  // D = right
+        if (px < 2) { px = 2; }
+        if (px > 56) { px = 56; }
+        
+        // Ball movement
+        bx += dx;
+        by += dy;
+        
+        // Ball bounce off walls
+        if (bx < 2) { bx = 2; dx = 0 - dx; }
+        if (bx > 60) { bx = 60; dx = 0 - dx; }
+        if (by < 2) { by = 2; dy = 0 - dy; }
+        
+        // Ball bounce off paddle
+        if (by > 26) {
+            if (bx >= px && bx < px + 6) {
+                by = 26;
+                dy = 0 - dy;
+                beep(2);
+            } else if (by > 30) {
+                // Ball lost - reset
+                bx = 32;
+                by = 20;
+                dy = 255;
+                beep(10);
+            }
+        }
+        
+        // Check brick collisions
+        for (i = 0; i < 16; i++) {
+            if (bricks[i] == 1) {
+                // Calculate brick position
+                brickx = (i & 7) * 8 + 2;
+                bricky = (i / 8) * 3 + 2;
+                
+                // Check collision
+                if (bx >= brickx && bx < brickx + 4) {
+                    if (by >= bricky && by < bricky + 2) {
+                        bricks[i] = 0;
+                        dy = 0 - dy;
+                        score++;
+                        beep(4);
+                    }
+                }
+            }
+        }
+        
+        // Draw bricks
+        for (i = 0; i < 16; i++) {
+            if (bricks[i] == 1) {
+                brickx = (i & 7) * 8 + 2;
+                bricky = (i / 8) * 3 + 2;
+                draw(brickx, bricky, 1, brick);
+            }
+        }
+        
+        // Draw paddle and ball
+        draw(px, 28, 1, paddle);
+        draw(bx, by, 1, ball);
+        
+        // Draw score
+        drawnum(score, 0, 0);
+        
+        wait(16);
+    }
+}

@@ -1,0 +1,64 @@
+// Animation Demo
+// Demonstrates: multiple sprites, frame-based animation, input
+
+sprite frame1[5] = {
+    0x18,  // ...11...
+    0x3C,  // ..1111..
+    0x7E,  // .111111.
+    0x3C,  // ..1111..
+    0x18   // ...11...
+};
+
+sprite frame2[5] = {
+    0x3C,  // ..1111..
+    0x7E,  // .111111.
+    0xFF,  // 11111111
+    0x7E,  // .111111.
+    0x3C   // ..1111..
+};
+
+sprite frame3[5] = {
+    0x7E,  // .111111.
+    0xFF,  // 11111111
+    0xFF,  // 11111111
+    0xFF,  // 11111111
+    0x7E   // .111111.
+};
+
+void main() {
+    byte x = 28;
+    byte y = 12;
+    byte frame = 0;
+    byte speed = 8;
+    
+    while (1) {
+        clear;
+        
+        // Movement
+        if (key(5)) { y -= 1; }  // W
+        if (key(8)) { y += 1; }  // S
+        if (key(7)) { x -= 1; }  // A
+        if (key(9)) { x += 1; }  // D
+        
+        // Keep on screen
+        if (x > 60) { x = 0; }
+        if (y > 27) { y = 0; }
+        
+        // Draw current frame
+        if (frame < speed) {
+            draw(x, y, 5, frame1);
+        } else if (frame < speed * 2) {
+            draw(x, y, 5, frame2);
+        } else {
+            draw(x, y, 5, frame3);
+        }
+        
+        // Advance frame
+        frame++;
+        if (frame >= speed * 3) {
+            frame = 0;
+        }
+        
+        wait(16);
+    }
+}

@@ -1,0 +1,32 @@
+// Hello World - Draw a simple pattern
+// Demonstrates: sprites, drawing, basic program structure
+
+sprite smiley[5] = {
+    0x3C,  // ..1111..
+    0x42,  // .1....1.
+    0xA5,  // 1.1..1.1
+    0x81,  // 1......1
+    0x5A   // .1.11.1.
+};
+
+sprite corner[3] = {
+    0xE0,  // 111.....
+    0xE0,  // 111.....
+    0xE0   // 111.....
+};
+
+void main() {
+    clear;
+    
+    // Draw smiley in center
+    draw(28, 12, 5, smiley);
+    
+    // Draw corners
+    draw(0, 0, 3, corner);
+    draw(61, 0, 3, corner);
+    draw(0, 29, 3, corner);
+    draw(61, 29, 3, corner);
+    
+    // Wait forever
+    while (1) { }
+}

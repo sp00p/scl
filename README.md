@@ -16,7 +16,25 @@ CHIP-8 emulator, debugger, and compiler. Write games in a C-like language and ru
 
 ## Building
 
-Requires CMake 3.16+ and a C++17 compiler. SDL2 is included as a submodule.
+Requires CMake 3.16+ and a C++17 compiler. SDL2 and other dependencies are included as submodules.
+
+### Quick Setup
+
+**Linux/macOS:**
+```bash
+git clone --recurse-submodules https://github.com/user/scl.git
+cd scl
+./scripts/setup.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone --recurse-submodules https://github.com/user/scl.git
+cd scl
+.\scripts\setup.ps1
+```
+
+### Manual Build
 
 ```bash
 git clone --recurse-submodules https://github.com/user/scl.git
@@ -26,9 +44,19 @@ cmake ..
 cmake --build . --config Release
 ```
 
-If you cloned without `--recurse-submodules`:
+### Development Scripts
+
+| Script | Description |
+|--------|-------------|
+| `scripts/setup.sh` / `setup.ps1` | Install dependencies and build |
+| `scripts/build.sh` / `build.ps1` | Build the project |
+| `scripts/test.sh` / `test.ps1` | Run tests |
+
+Build options:
 ```bash
-git submodule update --init --recursive
+./scripts/build.sh debug    # Debug build
+./scripts/build.sh release  # Release build (default)
+./scripts/build.sh clean    # Clean and rebuild
 ```
 
 ## Quick Start
@@ -89,6 +117,22 @@ void main() {
 ```
 
 See [docs/SCL.md](docs/SCL.md) for the full language reference.
+
+## Examples
+
+The `examples/` folder contains ready-to-run SCL programs:
+
+- **hello.scl** — Simple sprite drawing
+- **animation.scl** — Frame-based animation with movement
+- **pong.scl** — Single-player Pong with functions
+- **snake.scl** — Snake game with arrays and collision
+- **breakout.scl** — Brick-breaking game
+
+Compile and run:
+```bash
+scl compile examples/snake.scl snake.ch8
+scl run snake.ch8
+```
 
 ## Docs
 
