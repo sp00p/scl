@@ -31,6 +31,7 @@ jobs:
         path: |
           build/Release/scl.exe
           build/Release/assets/
+          examples/
 
   build-linux:
     runs-on: ubuntu-latest
@@ -58,7 +59,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: scl-linux
-        path: build/scl
+        path: |
+          build/scl
+          examples/
 
   build-macos:
     runs-on: macos-latest
@@ -81,4 +84,6 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: scl-macos
-        path: build/scl
+        path: |
+          build/scl
+          examples/

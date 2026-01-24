@@ -46,6 +46,7 @@ jobs:
         New-Item -ItemType Directory -Force -Path release
         Copy-Item build/Release/scl.exe release/
         Copy-Item -Recurse build/Release/assets release/
+        Copy-Item -Recurse examples release/
         Copy-Item README.md release/
         Copy-Item LICENSE release/
         Copy-Item -Recurse docs release/
@@ -56,6 +57,7 @@ jobs:
       run: |
         mkdir -p release
         cp build/scl release/
+        cp -r examples release/
         cp README.md LICENSE release/
         cp -r docs release/
         tar -czvf ${{ matrix.artifact }}${{ matrix.ext }} -C release .
