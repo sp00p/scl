@@ -1,4 +1,0 @@
-{
-    "cmake.configureOnOpen": true,
-    "makefile.makefilePath": "src/Makefile"
-}
