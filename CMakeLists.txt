@@ -18,6 +18,7 @@ add_executable(chip8
     src/compiler/error_handler.cpp
     src/compiler/source_map.cpp
     src/config/runtime_config.cpp
+    src/decompiler/decompiler.cpp
     src/disassembler/disassembler.cpp
 )
 
