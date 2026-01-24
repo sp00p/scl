@@ -86,7 +86,6 @@ The primary data type is `byte`, an 8-bit unsigned integer (0-255).
 byte x;           // Declaration (uninitialized)
 byte y = 10;      // Declaration with initialization
 byte z = 0xFF;    // Hex literal (255)
-byte w = 0b1010;  // Binary literal (10)
 ```
 
 ### Arrays
@@ -103,6 +102,20 @@ byte i = 3;
 data[i] = 100;
 grid[i][i] = 255;
 ```
+
+### Character Literals
+String literals evaluate to the ASCII value of their first character. This is useful for character comparisons:
+
+```c
+byte key_pressed = waitkey();
+if (key_pressed == "A") {   // Compares against ASCII value 65
+    // Handle 'A' key
+}
+
+byte initial = "X";         // Sets initial to 88 (ASCII for 'X')
+```
+
+Supported escape sequences: `\n` (newline), `\r` (carriage return), `\t` (tab), `\\` (backslash), `\"` (quote), `\0` (null).
 
 ## Variables
 
@@ -354,7 +367,7 @@ void main() {
 
 Sprites are 8 pixels wide and 1-15 pixels tall. Each row is one byte where bits represent pixels.
 
-### Defining Sprites
+### Defining Sprites with Hex Values
 ```c
 // 3x3 ball
 sprite ball[3] = {
@@ -372,6 +385,30 @@ sprite letterA[5] = {
     0x88   // 1...1...
 };
 ```
+
+### ASCII Art Sprites
+You can define sprites using ASCII art strings for easier visualization. Use `X`, `#`, `1`, or `*` for filled pixels:
+
+```c
+// Much easier to read!
+sprite smiley[5] = {
+    "..XXXX..",
+    ".X....X.",
+    "X.X..X.X",
+    "X......X",
+    ".X.XX.X."
+};
+
+sprite arrow[5] = {
+    "...#....",
+    "..###...",
+    ".#####..",
+    "...#....",
+    "...#...."
+};
+```
+
+Each string represents one row. Characters `X`, `#`, `1`, or `*` set a pixel; all other characters leave it off.
 
 ### Drawing Sprites
 ```c
@@ -478,6 +515,21 @@ asm { 0x00E0 }  // CLS - clear screen
 asm {
     0x6000      // LD V0, 0
     0x6100      // LD V1, 0
+}
+```
+
+## Comments
+
+SCL supports both single-line and block comments:
+
+```c
+// This is a single-line comment
+
+/* This is a
+   block comment */
+
+void main() {
+    byte x = 10;  // Inline comment
 }
 ```
 
