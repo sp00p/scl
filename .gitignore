@@ -26,3 +26,13 @@ Makefile
 # OS
 .DS_Store
 Thumbs.db
+
+# VS Code Extension
+scl-vscode/node_modules/
+scl-vscode/out/
+scl-vscode/*.vsix
+
+# Temporary files
+*.log
+imgui.ini
+temp_*
