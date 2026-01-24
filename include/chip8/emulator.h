@@ -44,6 +44,16 @@ public:
     SDL_Window* getWindow() { return window; }
     SDL_Renderer* getRenderer() { return renderer; }
 
+    // Accessors for debug UI
+    uint16_t getPC() const { return PC; }
+    uint16_t getI() const { return I; }
+    uint8_t getSP() const { return SP; }
+    const uint8_t* getV() const { return V.data(); }
+    const uint8_t* getMemory() const { return memory.data(); }
+    uint8_t* getMemory() { return memory.data(); }
+    const uint16_t* getStack() const { return stack.data(); }
+    const uint8_t* getDisplay() const { return display.data(); }
+
 private:
     std::array<uint8_t, SCREEN_WIDTH * SCREEN_HEIGHT> display{};
     std::array<bool, 16> keys{};
