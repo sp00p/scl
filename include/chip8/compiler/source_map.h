@@ -40,12 +40,16 @@ public:
     const std::string& getSource() const { return source_code; }
     std::string getSourceLine(int line) const;
     int getLineCount() const { return static_cast<int>(source_lines.size()); }
+    void setSourceFile(const std::string& path) { source_file = path; }
+    const std::string& getSourceFile() const { return source_file; }
+    const std::vector<SourceMapping>& getAllMappings() const { return mappings; }
 
 private:
     std::vector<SourceMapping> mappings;
     std::map<uint16_t, size_t> address_to_mapping;
     std::map<int, uint16_t> line_to_address;
     std::string source_code;
+    std::string source_file;
     std::vector<std::string> source_lines;
 };
 

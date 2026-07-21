@@ -101,6 +101,9 @@ bool SourceMap::save(const std::string& filepath) const {
     
     file << "{\n";
     file << "  \"version\": 1,\n";
+    if (!source_file.empty()) {
+        file << "  \"source_file\": \"" << source_file << "\",\n";
+    }
     file << "  \"mappings\": [\n";
     
     for (size_t i = 0; i < mappings.size(); ++i) {
@@ -131,7 +134,25 @@ bool SourceMap::load(const std::string& filepath) {
     // Simple JSON parser (handles our specific format)
     std::string content((std::istreambuf_iterator<char>(file)),
                          std::istreambuf_iterator<char>());
-    
+
+    // Load the referenced source file (for the debugger's source panel)
+    size_t src_pos = content.find("\"source_file\":");
+    if (src_pos != std::string::npos) {
+        size_t start = content.find('"', src_pos + 14);
+        if (start != std::string::npos) {
+            size_t end = content.find('"', start + 1);
+            if (end != std::string::npos) {
+                source_file = content.substr(start + 1, end - start - 1);
+                std::ifstream src(source_file);
+                if (src.is_open()) {
+                    std::string text((std::istreambuf_iterator<char>(src)),
+                                      std::istreambuf_iterator<char>());
+                    setSource(text);
+                }
+            }
+        }
+    }
+
     size_t pos = 0;
     while ((pos = content.find("\"addr\":", pos)) != std::string::npos) {
         pos += 7;

@@ -72,7 +72,7 @@ target_include_directories(test_parser PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_parser PRIVATE gtest gtest_main)
 add_test(NAME test_parser COMMAND test_parser)
 
-add_executable(test_codegen tests/test_codegen.cpp src/compiler/lexer.cpp src/compiler/parser.cpp src/compiler/codegen.cpp src/compiler/error_handler.cpp)
+add_executable(test_codegen tests/test_codegen.cpp src/compiler/lexer.cpp src/compiler/parser.cpp src/compiler/codegen.cpp src/compiler/error_handler.cpp src/compiler/source_map.cpp)
 target_include_directories(test_codegen PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_codegen PRIVATE gtest gtest_main)
 add_test(NAME test_codegen COMMAND test_codegen)
@@ -80,7 +80,7 @@ add_test(NAME test_codegen COMMAND test_codegen)
 add_executable(test_integration tests/test_integration.cpp
     src/compiler/lexer.cpp src/compiler/parser.cpp src/compiler/codegen.cpp
     src/compiler/error_handler.cpp src/compiler/preprocessor.cpp src/compiler/optimizer.cpp
-    src/emulator/chip8.cpp)
+    src/compiler/source_map.cpp src/emulator/chip8.cpp)
 target_include_directories(test_integration PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/third_party/SDL2/include)

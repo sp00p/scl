@@ -10,6 +10,7 @@
 
 #include "ast.h"
 #include "error_handler.h"
+#include "source_map.h"
 #include "symbol_table.h"
 #include <cstdint>
 #include <map>
@@ -32,6 +33,7 @@ class CodeGenerator : public ASTVisitor {
 public:
     CodeGenerator(ErrorHandler& errorHandler);
     std::vector<uint8_t> generate(ProgramNode& program);
+    const SourceMap& getSourceMap() const { return source_map; }
 
     void visit(ProgramNode& node) override;
     void visit(FunctionNode& node) override;
@@ -125,6 +127,7 @@ private:
     std::map<std::string, EntityInstance> entity_instances;
 
     uint16_t next_array_addr = 0x800;
+    SourceMap source_map;
     std::vector<bool> used_registers;
     ErrorHandler& errorHandler;
     uint8_t current_result_reg = 1;

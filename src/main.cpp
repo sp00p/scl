@@ -77,6 +77,11 @@ int run_emulator(const std::string& rom_file, bool debug_mode, bool schip_mode =
                 std::cerr << "Failed to initialize debug UI" << std::endl;
                 return 1;
             }
+
+            // Auto-load the source map emitted by the compiler, if present
+            if (debug_ui.loadSourceMap(rom_file + ".map")) {
+                std::cout << "Loaded source map: " << rom_file << ".map" << std::endl;
+            }
             
             // Wire up ROM browser callback
             debug_ui.setRomLoadCallback([&chip8](const std::string& path) {
@@ -127,6 +132,9 @@ int run_emulator(const std::string& rom_file, bool debug_mode, bool schip_mode =
                 bool should_execute = !debug_mode || !debug_ui.isPaused() || debug_ui.shouldStep();
                 
                 if (should_execute) {
+                    // New 60Hz frame: release a pending display wait
+                    chip8.clearVblankWait();
+
                     int cycles = (debug_mode && debug_ui.isPaused()) ? 1
                         : chip8::getConfig().timing.instructions_per_frame;
                     for (int i = 0; i < cycles; i++) {
@@ -135,6 +143,13 @@ int run_emulator(const std::string& rom_file, bool debug_mode, bool schip_mode =
                         // SCHIP EXIT opcode (00FD) requests emulator shutdown
                         if (chip8.shouldExit()) {
                             quit = true;
+                            break;
+                        }
+
+                        // Display wait quirk: original CHIP-8 draws at most one
+                        // sprite per vblank. Stop executing until the next frame.
+                        if (chip8::getConfig().quirks.display_wait &&
+                            chip8.isWaitingForVblank()) {
                             break;
                         }
 

@@ -22,6 +22,7 @@
             array_sizes.clear();
             next_array_addr = 0x800;  // Arrays/globals start at 0x800, leaving room for code
             fixups.clear();
+            source_map.clear();
             current_result_reg = 1;
             
             // Dead code elimination: build call graph and find reachable functions
@@ -142,11 +143,17 @@
                 
                 // Warn about unreachable code after control flow termination
                 if (block_terminated) {
-                    errorHandler.warning("Unreachable code after return/break/continue", 
+                    errorHandler.warning("Unreachable code after return/break/continue",
                                         stmt->line, stmt->column);
                     break;  // Don't process unreachable statements
                 }
-                
+
+                // Record source mapping: this statement's code starts here
+                if (stmt->line > 0) {
+                    source_map.addMapping(static_cast<uint16_t>(0x200 + output.size()),
+                                          stmt->line, stmt->column);
+                }
+
                 stmt->accept(*this);
                 
                 // Check if this statement terminates control flow
@@ -1955,13 +1962,27 @@
             std::vector<bool> remove(output.size(), false);  // Mark bytes to remove
             size_t bytes_saved = 0;
             
+            // Returns true if the opcode is a conditional skip (3xkk, 4xkk,
+            // 5xy0, 9xy0, Ex9E, ExA1). The instruction after a skip must not
+            // be removed or the skip would jump over the wrong instruction.
+            auto is_skip = [](uint16_t op) {
+                uint16_t hi = op & 0xF000;
+                return hi == 0x3000 || hi == 0x4000 || hi == 0x5000 ||
+                       hi == 0x9000 || hi == 0xE000;
+            };
+
             // Scan for patterns (instructions are 2 bytes each)
             for (size_t i = 0; i + 3 < output.size(); i += 2) {
                 uint16_t op1 = (output[i] << 8) | output[i + 1];
                 uint16_t op2 = (output[i + 2] << 8) | output[i + 3];
+
+                // Never remove the instruction that a skip jumps over
+                bool op1_follows_skip = (i >= 2) &&
+                    is_skip((output[i - 2] << 8) | output[i - 1]);
+                bool op2_follows_skip = is_skip(op1);
                 
                 // Pattern 1: LD Vx, Vx (8xy0 where x == y) - no-op
-                if ((op1 & 0xF00F) == 0x8000) {
+                if ((op1 & 0xF00F) == 0x8000 && !op1_follows_skip) {
                     uint8_t x = (op1 >> 8) & 0xF;
                     uint8_t y = (op1 >> 4) & 0xF;
                     if (x == y) {
@@ -1977,7 +1998,7 @@
                     uint8_t y1 = (op1 >> 4) & 0xF;
                     uint8_t x2 = (op2 >> 8) & 0xF;
                     uint8_t y2 = (op2 >> 4) & 0xF;
-                    if (x1 == y2 && y1 == x2) {
+                    if (x1 == y2 && y1 == x2 && !op2_follows_skip) {
                         // Second LD is redundant after first
                         remove[i + 2] = remove[i + 3] = true;
                         bytes_saved += 2;
@@ -1986,14 +2007,14 @@
                 }
                 
                 // Pattern 3: ADD Vx, 0 - no-op
-                if ((op1 & 0xF0FF) == 0x7000) {
+                if ((op1 & 0xF0FF) == 0x7000 && !op1_follows_skip) {
                     remove[i] = remove[i + 1] = true;
                     bytes_saved += 2;
                     continue;
                 }
                 
                 // Pattern 4: LD Vx, NN followed by LD Vx, MM - first is dead
-                if ((op1 & 0xF000) == 0x6000 && (op2 & 0xF000) == 0x6000) {
+                if ((op1 & 0xF000) == 0x6000 && (op2 & 0xF000) == 0x6000 && !op1_follows_skip) {
                     uint8_t x1 = (op1 >> 8) & 0xF;
                     uint8_t x2 = (op2 >> 8) & 0xF;
                     if (x1 == x2) {
@@ -2008,6 +2029,8 @@
             if (output.size() >= 2) {
                 size_t i = output.size() - 2;
                 uint16_t op = (output[i] << 8) | output[i + 1];
+                bool follows_skip = (i >= 2) && is_skip((output[i - 2] << 8) | output[i - 1]);
+                if (follows_skip) op = 0; // never remove a skipped instruction
                 if ((op & 0xF00F) == 0x8000) {
                     uint8_t x = (op >> 8) & 0xF;
                     uint8_t y = (op >> 4) & 0xF;
@@ -2051,6 +2074,20 @@
             // Update all fixups
             for (auto& fixup : fixups) {
                 fixup.address -= static_cast<uint16_t>(offset_adjust[fixup.address]);
+            }
+
+            // Update source map addresses (mappings use absolute 0x200-based addresses)
+            {
+                std::vector<SourceMapping> old_mappings = source_map.getAllMappings();
+                source_map.clear();
+                for (const auto& m : old_mappings) {
+                    size_t old_offset = m.address - 0x200;
+                    uint16_t new_addr = m.address;
+                    if (old_offset < offset_adjust.size()) {
+                        new_addr = static_cast<uint16_t>(m.address - offset_adjust[old_offset]);
+                    }
+                    source_map.addMapping(new_addr, m.line, m.column, m.filename);
+                }
             }
             
             // Update all jump (1xxx) and call (2xxx) targets that were already patched

@@ -124,9 +124,17 @@ void Compiler::compile(const std::string &source_file, const std::string &output
 
         out.write(reinterpret_cast<const char*>(output.data()), output.size());
 
+        // Emit source map alongside the ROM (used by the debugger's source panel)
+        compiler::SourceMap map = codeGen->getSourceMap();
+        map.setSourceFile(source_file);
+        std::string map_file = output_file + ".map";
+        if (!map.save(map_file)) {
+            errorHandler.warning("Could not write source map: " + map_file, 0, 0);
+        }
+
         if (debug_mode) {
             std::cout << "Compilation successful: wrote " << output.size() << " bytes to "
-                      << output_file << std::endl;
+                      << output_file << " (source map: " << map_file << ")" << std::endl;
         }
 
     }
