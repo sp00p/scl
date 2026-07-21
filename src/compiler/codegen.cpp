@@ -252,19 +252,10 @@
 
             // Optimization 2: Immediate ADD/SUB when right operand is constant
             if (right_const && (node.op == TokenType::PLUS || node.op == TokenType::MINUS)) {
-                uint8_t left_reg = allocate_register();
-                
-                // Evaluate left operand into left_reg (use visitor for proper global handling)
-                uint8_t saved = current_result_reg;
-                current_result_reg = left_reg;
+                // Evaluate left operand directly into the destination register,
+                // then add the immediate (no temp register needed)
                 node.left->accept(*this);
-                current_result_reg = saved;
-                
-                // Copy to dest if needed
-                if (current_result_reg != left_reg) {
-                    emit_opcode(0x8000 | (current_result_reg << 8) | (left_reg << 4) | 0x0); // LD dest, left
-                }
-                
+
                 if (node.op == TokenType::PLUS) {
                     // ADD Vx, byte (7xkk)
                     emit_opcode(0x7000 | (current_result_reg << 8) | (*right_const & 0xFF));
@@ -272,9 +263,41 @@
                     // SUB via ADD with two's complement: ADD Vx, -byte
                     emit_opcode(0x7000 | (current_result_reg << 8) | ((-*right_const) & 0xFF));
                 }
-                
-                free_register(left_reg);
                 return;
+            }
+
+            // Optimization 3: Strength-reduce multiply/divide by a constant
+            // power of two into shifts (avoids the runtime multiply/divide
+            // loops and their temp registers entirely)
+            if (right_const && (node.op == TokenType::MULTIPLY || node.op == TokenType::DIVIDE)) {
+                int c = *right_const & 0xFF;
+                if (node.op == TokenType::DIVIDE && c == 0) {
+                    errorHandler.error("Division by zero", node.line, node.column);
+                    return;
+                }
+                if (c == 1) {
+                    node.left->accept(*this); // x * 1 == x / 1 == x
+                    return;
+                }
+                if (node.op == TokenType::MULTIPLY && c == 0) {
+                    emit_opcode(0x6000 | (current_result_reg << 8)); // LD dest, 0
+                    return;
+                }
+                if ((c & (c - 1)) == 0) { // power of two
+                    node.left->accept(*this); // evaluate left into dest
+                    int shifts = 0;
+                    while ((1 << shifts) < c) shifts++;
+                    for (int s = 0; s < shifts; s++) {
+                        // Shift dest in place (x==y makes both shift-quirk
+                        // interpretations equivalent); VF gets the shifted-out bit
+                        if (node.op == TokenType::MULTIPLY) {
+                            emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0xE); // SHL
+                        } else {
+                            emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0x6); // SHR
+                        }
+                    }
+                    return;
+                }
             }
 
             // Fallback: Evaluate both operands into temporary registers
@@ -344,25 +367,62 @@
         }
 
         void CodeGenerator::visit(ConditionNode& node) {
-            // Evaluate both sides into temporaries (use visitor for proper global/constant handling)
-            uint8_t left_reg = allocate_register();
-            uint8_t right_reg = allocate_register();
+            // EQ/NE against a constant can use the immediate skip forms
+            // (SE/SNE Vx, kk) - no temp register needed for the right side
+            auto right_const = try_get_constant(node.right.get());
+            if (right_const && (node.op == TokenType::EQUALS || node.op == TokenType::NOT_EQUALS)) {
+                bool left_allocated;
+                uint8_t left_reg = get_comparison_operand(node.left.get(), left_allocated);
 
-            uint8_t saved = current_result_reg;
-            current_result_reg = left_reg;
-            node.left->accept(*this);
-            current_result_reg = saved;
+                emit_opcode(0x6000 | (current_result_reg << 8) | 0x00); // LD dest, 0
+                if (node.op == TokenType::EQUALS) {
+                    emit_opcode(0x4000 | (left_reg << 8) | (*right_const & 0xFF)); // SNE left, kk
+                } else {
+                    emit_opcode(0x3000 | (left_reg << 8) | (*right_const & 0xFF)); // SE left, kk
+                }
+                emit_opcode(0x6000 | (current_result_reg << 8) | 0x01); // LD dest, 1
 
-            saved = current_result_reg;
-            current_result_reg = right_reg;
-            node.right->accept(*this);
-            current_result_reg = saved;
+                if (left_allocated) free_register(left_reg);
+                return;
+            }
+
+            // Comparison emitters never modify the operand registers, so plain
+            // local variables can be compared in place; only complex operands
+            // need a temporary
+            bool left_allocated, right_allocated;
+            uint8_t left_reg = get_comparison_operand(node.left.get(), left_allocated);
+            uint8_t right_reg = get_comparison_operand(node.right.get(), right_allocated);
 
             // Write boolean result into current_result_reg (0 or 1)
             emit_comparison_node(current_result_reg, left_reg, right_reg, node.op);
 
-            free_register(left_reg);
-            free_register(right_reg);
+            if (left_allocated) free_register(left_reg);
+            if (right_allocated) free_register(right_reg);
+        }
+
+        // Returns a register holding the operand's value. Reuses a local
+        // variable's own register when safe (it must not alias the result
+        // register, which comparison emitters use as scratch); otherwise
+        // allocates a temporary and sets allocated = true.
+        uint8_t CodeGenerator::get_comparison_operand(ExprNode* expr, bool& allocated) {
+            allocated = false;
+            if (auto* var = dynamic_cast<VariableExprNode*>(expr)) {
+                // Not a named constant and not a memory-backed global
+                if (!constants.count(var->name) && !arrays.count(var->name)) {
+                    auto it = variables.find(var->name);
+                    if (it != variables.end() && it->second.reg != current_result_reg) {
+                        return it->second.reg;
+                    }
+                }
+            }
+
+            allocated = true;
+            uint8_t reg = allocate_register();
+            uint8_t saved = current_result_reg;
+            current_result_reg = reg;
+            expr->accept(*this);
+            current_result_reg = saved;
+            return reg;
         }
 
         void CodeGenerator::visit(IfNode& node) {
@@ -378,6 +438,10 @@
 
             uint16_t jump_to_else_at = output.size();
             emit_jump(0); // placeholder
+
+            // The condition value is dead after the branch above - free its
+            // register now so the branch bodies can reuse it
+            free_register(cond_reg);
 
             // then branch
             node.then_branch->accept(*this);
@@ -396,8 +460,6 @@
                 node.else_branch->accept(*this);
                 patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
             }
-
-            free_register(cond_reg);
         }
 
         void CodeGenerator::visit(WhileNode& node) {
@@ -418,6 +480,9 @@
             uint16_t jump_to_end_at = output.size();
             emit_jump(0); // placeholder - jump to loop end if cond == 0 (false)
 
+            // Condition value is dead after the branch - free it for the body
+            free_register(cond_reg);
+
             // body
             node.body->accept(*this);
 
@@ -433,8 +498,6 @@
                 patch_jump_at(break_addr, loop_end);
             }
             loop_stack.pop_back();
-
-            free_register(cond_reg);
         }
 
         void CodeGenerator::visit(ForNode& node) {
@@ -456,6 +519,9 @@
             emit_opcode(0x4000 | (cond_reg << 8) | 0x00); // SNE Vx, 0 => skip next if cond != 0 (true)
             uint16_t jump_to_end_at = output.size();
             emit_jump(0); // placeholder - jump to loop end if cond == 0 (false)
+
+            // Condition value is dead after the branch - free it for the body
+            free_register(cond_reg);
 
             // For continue in for-loops, we need to jump to the increment, not the condition
             // We use fixups because we don't know the increment address until after the body
@@ -489,8 +555,6 @@
                 patch_jump_at(break_addr, loop_end);
             }
             loop_stack.pop_back();
-
-            free_register(cond_reg);
         }
 
         void CodeGenerator::visit(DrawNode& node) {
@@ -555,19 +619,23 @@
                 if (ticks == 0) ticks = 1; // Minimum 1 tick
                 emit_opcode(0x6000 | (delay_reg << 8) | ticks); // LD V0, ticks
             } else if (node.type == WaitNode::WaitType::VARIABLE) {
-                if (auto* var_expr = dynamic_cast<VariableExprNode*>(node.duration.get())) {
-                    uint8_t var_reg = get_variable_register(var_expr->name);
-                    emit_opcode(0x8000 | (delay_reg << 8) | (var_reg << 4) | 0x0); // LD V0, Vx
-                } else if (auto* num_expr = dynamic_cast<NumberExprNode*>(node.duration.get())) {
+                if (auto* num_expr = dynamic_cast<NumberExprNode*>(node.duration.get())) {
                     uint8_t ticks = static_cast<uint8_t>((num_expr->value / 16) & 0xFF);
                     if (ticks == 0) ticks = 1;
                     emit_opcode(0x6000 | (delay_reg << 8) | ticks); // LD V0, ticks
                 } else {
-                    // Evaluate arbitrary expression into V0
+                    // Evaluate expression into V0, then convert ms -> 60Hz ticks
+                    // (divide by 16 via shifts) with a minimum of 1 tick, matching
+                    // the constant case above
                     uint8_t saved = current_result_reg;
                     current_result_reg = delay_reg;
                     node.duration->accept(*this);
                     current_result_reg = saved;
+                    for (int s = 0; s < 4; s++) {
+                        emit_opcode(0x8000 | (delay_reg << 8) | (delay_reg << 4) | 0x6); // SHR V0
+                    }
+                    emit_opcode(0x4000 | (delay_reg << 8) | 0x00); // SNE V0, 0 -> skip if nonzero
+                    emit_opcode(0x7000 | (delay_reg << 8) | 0x01); // ADD V0, 1
                 }
             }
 
@@ -1133,7 +1201,15 @@
                     return i;
                 }
             }
-            errorHandler.error("Out of registers (max 14 local variables per function). Use 'global' for additional storage.", 0, 0);
+            // Build a diagnostic showing which registers are variables vs temps
+            std::string vars_desc;
+            for (const auto& [name, var] : variables) {
+                if (!vars_desc.empty()) vars_desc += ", ";
+                vars_desc += name;
+            }
+            errorHandler.error("Out of registers (13 available per function; all in use by locals/temporaries). "
+                               "Locals: [" + vars_desc + "]. "
+                               "Use 'global' for additional storage or simplify nested expressions.", 0, 0);
             return 0; // Default to V0, but ideally this should never happen
         }
 
@@ -1169,17 +1245,15 @@
             switch (op) {
                 case TokenType::EQUALS:
                     // EQUALS: result = 1 if left == right, 0 otherwise
-                    // Use XOR in a temp register, check if 0
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x01);            // LD dest, 1 (assume equal)
-                    emit_opcode(0x8000 | (left_reg << 8) | (right_reg << 4) | 0x3); // XOR left, right (modifies left_reg)
-                    emit_opcode(0x3000 | (left_reg << 8) | 0x00);            // SE left, 0 -> skip if XOR==0 (equal)
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x00);            // LD dest, 0 (not equal case)
+                    // Uses the native register-compare skip; does not clobber operands
+                    emit_opcode(0x6000 | (dest_reg << 8) | 0x00);            // LD dest, 0
+                    emit_opcode(0x9000 | (left_reg << 8) | (right_reg << 4)); // SNE left, right -> skip if !=
+                    emit_opcode(0x6000 | (dest_reg << 8) | 0x01);            // LD dest, 1 (equal case)
                     break;
                 case TokenType::NOT_EQUALS:
                     // NOT_EQUALS: result = 1 if left != right, 0 otherwise
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x00);            // LD dest, 0 (assume equal)
-                    emit_opcode(0x8000 | (left_reg << 8) | (right_reg << 4) | 0x3); // XOR left, right (modifies left_reg)
-                    emit_opcode(0x3000 | (left_reg << 8) | 0x00);            // SE left, 0 -> skip if XOR==0 (equal)
+                    emit_opcode(0x6000 | (dest_reg << 8) | 0x00);            // LD dest, 0
+                    emit_opcode(0x5000 | (left_reg << 8) | (right_reg << 4)); // SE left, right -> skip if ==
                     emit_opcode(0x6000 | (dest_reg << 8) | 0x01);            // LD dest, 1 (not equal case)
                     break;
                 case TokenType::LESS_THAN:

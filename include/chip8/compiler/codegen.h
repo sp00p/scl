@@ -89,6 +89,7 @@ private:
     uint8_t getMaxLocalVariableReg();
 
     void emit_comparison_node(uint8_t dest_reg, uint8_t left_Reg, uint8_t right_reg, TokenType op);
+    uint8_t get_comparison_operand(ExprNode* expr, bool& allocated);
     void process_binary_operation(uint8_t dest_reg, uint8_t left_reg, uint8_t right_reg, TokenType op);
 
     std::optional<int> try_get_constant(ExprNode* expr);
