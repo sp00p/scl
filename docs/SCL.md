@@ -43,7 +43,7 @@ draw(x, y, 3, sprite);    // Draw sprite
 drawnum(score, 0, 0);     // Draw number
 key(5)                    // Check key (returns 0/1)
 waitkey()                 // Wait for key press
-wait(16);                 // Delay (~16ms per tick)
+wait(16);                 // Delay in ms (rounded to 16ms timer ticks)
 beep(10);                 // Play sound
 rand(0xFF)                // Random 0-255
 collision                 // 1 if last draw collided
@@ -443,7 +443,7 @@ draw(10, 20, ball);      // Draw ball at (10,20), all rows
 ### Timing
 | Function/Expression | Description |
 |---------------------|-------------|
-| `wait(ticks)` | Wait for specified timer ticks (~16ms each) |
+| `wait(ms)` | Wait approximately `ms` milliseconds (rounded down to 16ms timer ticks, minimum one tick) |
 | `timer` | Read current delay timer value |
 
 ### Sound
