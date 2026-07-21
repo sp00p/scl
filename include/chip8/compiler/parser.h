@@ -37,14 +37,14 @@ private:
     std::unique_ptr<ASTNode> parse_assignment_or_call();
     std::unique_ptr<ReturnNode> parse_return_statement();
     std::unique_ptr<FunctionCallNode> parse_function_call(const std::string& name, int line, int col);
-    std::unique_ptr<ASTNode> parse_expression();
+    std::unique_ptr<ExprNode> parse_expression();
     std::unique_ptr<ExprNode> parse_bitwise_or();
     std::unique_ptr<ExprNode> parse_bitwise_xor();
     std::unique_ptr<ExprNode> parse_bitwise_and();
     std::unique_ptr<ExprNode> parse_additive();
     std::unique_ptr<ExprNode> parse_multiplicative();
     std::unique_ptr<ExprNode> parse_comparison();
-    std::unique_ptr<ASTNode> parse_condition();
+    std::unique_ptr<ExprNode> parse_condition();
     std::unique_ptr<IfNode> parse_if_statement();
     std::unique_ptr<WhileNode> parse_while_statement();
     std::unique_ptr<SwitchNode> parse_switch_statement();

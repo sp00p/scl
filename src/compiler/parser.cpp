@@ -282,8 +282,7 @@ std::unique_ptr<ASTNode> Parser::parse_variable_declaration() {
 
     if (check(TokenType::ASSIGN)) {
         advance();
-        var_decl->initializer = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_expression().release()));
+        var_decl->initializer = parse_expression();
     }
 
     expect(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -310,8 +309,7 @@ std::unique_ptr<ASTNode> Parser::parse_assignment_or_call() {
 
         while (check(TokenType::LBRACKET)) {
             advance();
-            arr_assign->indices.push_back(std::unique_ptr<ExprNode>(
-                dynamic_cast<ExprNode*>(parse_expression().release())));
+            arr_assign->indices.push_back(parse_expression());
             expect(TokenType::RBRACKET, "Expected ']' after array index");
         }
 
@@ -328,8 +326,7 @@ std::unique_ptr<ASTNode> Parser::parse_assignment_or_call() {
             field_assign->index = std::move(arr_assign->indices[0]);
             
             expect(TokenType::ASSIGN, "Expected '=' after entity field");
-            field_assign->value = std::unique_ptr<ExprNode>(
-                dynamic_cast<ExprNode*>(parse_expression().release()));
+            field_assign->value = parse_expression();
             expect(TokenType::SEMICOLON, "Expected ';' after assignment");
             return field_assign;
         }
@@ -372,7 +369,7 @@ std::unique_ptr<ASTNode> Parser::parse_assignment_or_call() {
             expect(TokenType::ASSIGN, "Expected '=' or compound assignment after array access");
         }
 
-        auto rhs = std::unique_ptr<ExprNode>(dynamic_cast<ExprNode*>(parse_expression().release()));
+        auto rhs = parse_expression();
 
         if (compound_op != TokenType::ASSIGN) {
             auto arr_ref = std::make_unique<ArrayAccessExprNode>();
@@ -420,8 +417,7 @@ std::unique_ptr<ASTNode> Parser::parse_assignment_or_call() {
         field_assign->field_name = field_name;
         
         expect(TokenType::ASSIGN, "Expected '=' after entity field");
-        field_assign->value = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_expression().release()));
+        field_assign->value = parse_expression();
         expect(TokenType::SEMICOLON, "Expected ';' after assignment");
         return field_assign;
     }
@@ -473,7 +469,7 @@ std::unique_ptr<ASTNode> Parser::parse_assignment_or_call() {
         expect(TokenType::ASSIGN, "Expected '=' or compound assignment in assignment");
     }
 
-    auto rhs = std::unique_ptr<ExprNode>(dynamic_cast<ExprNode*>(parse_expression().release()));
+    auto rhs = parse_expression();
     if (!rhs) {
         error("Expected expression in assignment");
     }
@@ -518,8 +514,7 @@ std::unique_ptr<ReturnNode> Parser::parse_return_statement() {
     advance();
 
     if (!check(TokenType::SEMICOLON)) {
-        ret->value = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_expression().release()));
+        ret->value = parse_expression();
     }
 
     expect(TokenType::SEMICOLON, "Expected ';' after return");
@@ -536,8 +531,7 @@ std::unique_ptr<FunctionCallNode> Parser::parse_function_call(const std::string&
 
     if (!check(TokenType::RPAREN)) {
         do {
-            call->arguments.push_back(std::unique_ptr<ExprNode>(
-                dynamic_cast<ExprNode*>(parse_expression().release())));
+            call->arguments.push_back(parse_expression());
         } while (check(TokenType::COMMA) && (advance(), true));
     }
 
@@ -554,8 +548,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
     if (check(TokenType::LPAREN)) {
         advance();
         // Full condition grammar inside parens so both (x + 1) and (a < b) work
-        auto expr = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_condition().release()));
+        auto expr = parse_condition();
         expect(TokenType::RPAREN, "Expected ')' after expression");
         return expr;
     }
@@ -590,8 +583,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
         auto key_expr = std::make_unique<KeyExprNode>();
         key_expr->line = line;
         key_expr->column = col;
-        key_expr->key_num = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_expression().release()));
+        key_expr->key_num = parse_expression();
         expect(TokenType::RPAREN, "Expected ')' after key number");
         return key_expr;
     }
@@ -610,8 +602,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
         auto rand_expr = std::make_unique<RandExprNode>();
         rand_expr->line = line;
         rand_expr->column = col;
-        rand_expr->max_val = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_expression().release()));
+        rand_expr->max_val = parse_expression();
         expect(TokenType::RPAREN, "Expected ')' after rand max");
         return rand_expr;
     }
@@ -651,8 +642,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
 
             if (!check(TokenType::RPAREN)) {
                 do {
-                    call->arguments.push_back(std::unique_ptr<ExprNode>(
-                        dynamic_cast<ExprNode*>(parse_expression().release())));
+                    call->arguments.push_back(parse_expression());
                 } while (check(TokenType::COMMA) && (advance(), true));
             }
             expect(TokenType::RPAREN, "Expected ')' after arguments");
@@ -662,8 +652,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
         std::unique_ptr<ExprNode> index = nullptr;
         if (check(TokenType::LBRACKET)) {
             advance();
-            index = std::unique_ptr<ExprNode>(
-                dynamic_cast<ExprNode*>(parse_expression().release()));
+            index = parse_expression();
             expect(TokenType::RBRACKET, "Expected ']' after index");
         }
         
@@ -690,8 +679,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
             
             while (check(TokenType::LBRACKET)) {
                 advance();
-                arr_access->indices.push_back(std::unique_ptr<ExprNode>(
-                    dynamic_cast<ExprNode*>(parse_expression().release())));
+                arr_access->indices.push_back(parse_expression());
                 expect(TokenType::RBRACKET, "Expected ']' after array index");
             }
             return arr_access;
@@ -710,7 +698,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
 
 // Expression grammar with C-style operator precedence (lowest to highest):
 //   |  ^  &  + -  * /  primary
-std::unique_ptr<ASTNode> Parser::parse_expression() {
+std::unique_ptr<ExprNode> Parser::parse_expression() {
     return parse_bitwise_or();
 }
 
@@ -785,8 +773,7 @@ std::unique_ptr<ExprNode> Parser::parse_comparison() {
     condition->line = current().line;
     condition->column = current().column;
 
-    condition->left = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_expression().release()));
+    condition->left = parse_expression();
 
     if (check(TokenType::EQUALS) || check(TokenType::NOT_EQUALS) ||
         check(TokenType::LESS_THAN) || check(TokenType::GREATER_THAN) ||
@@ -794,8 +781,7 @@ std::unique_ptr<ExprNode> Parser::parse_comparison() {
         condition->op = current().type;
         advance();
 
-        condition->right = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_expression().release()));
+        condition->right = parse_expression();
         return condition;
     }
 
@@ -804,7 +790,7 @@ std::unique_ptr<ExprNode> Parser::parse_comparison() {
     return std::unique_ptr<ExprNode>(condition->left.release());
 }
 
-std::unique_ptr<ASTNode> Parser::parse_condition() {
+std::unique_ptr<ExprNode> Parser::parse_condition() {
     auto left = parse_comparison();
 
     while (check(TokenType::AND_AND) || check(TokenType::OR_OR)) {
@@ -831,8 +817,7 @@ std::unique_ptr<IfNode> Parser::parse_if_statement() {
     advance();
     expect(TokenType::LPAREN, "Expected '(' after if");
 
-    if_node->condition = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_condition().release()));
+    if_node->condition = parse_condition();
 
     expect(TokenType::RPAREN, "Expected ')' after condition");
 
@@ -858,8 +843,7 @@ std::unique_ptr<SwitchNode> Parser::parse_switch_statement() {
     advance();
     expect(TokenType::LPAREN, "Expected '(' after switch");
 
-    switch_node->expr = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_expression().release()));
+    switch_node->expr = parse_expression();
 
     expect(TokenType::RPAREN, "Expected ')' after switch expression");
     expect(TokenType::LBRACE, "Expected '{' after switch");
@@ -913,8 +897,7 @@ std::unique_ptr<WhileNode> Parser::parse_while_statement() {
     advance();
     expect(TokenType::LPAREN, "Expected '(' after while");
 
-    while_node->condition = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_condition().release()));
+    while_node->condition = parse_condition();
 
     expect(TokenType::RPAREN, "Expected ')' after condition");
 
@@ -932,13 +915,11 @@ std::unique_ptr<DrawNode> Parser::parse_draw_statement() {
     advance();
     expect(TokenType::LPAREN, "Expected '(' after draw");
 
-    draw->x_expr = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_expression().release()));
+    draw->x_expr = parse_expression();
 
     expect(TokenType::COMMA, "Expected ',' between coordinates");
 
-    draw->y_expr = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_expression().release()));
+    draw->y_expr = parse_expression();
 
     expect(TokenType::COMMA, "Expected ',' after y-coordinate");
 
@@ -1081,18 +1062,15 @@ std::unique_ptr<DrawNumNode> Parser::parse_drawnum_statement() {
     advance();
     expect(TokenType::LPAREN, "Expected '(' after drawnum");
 
-    drawnum->value = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_expression().release()));
+    drawnum->value = parse_expression();
 
     expect(TokenType::COMMA, "Expected ',' after value");
 
-    drawnum->x_expr = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_expression().release()));
+    drawnum->x_expr = parse_expression();
 
     expect(TokenType::COMMA, "Expected ',' after x");
 
-    drawnum->y_expr = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_expression().release()));
+    drawnum->y_expr = parse_expression();
 
     expect(TokenType::RPAREN, "Expected ')' after drawnum arguments");
     expect(TokenType::SEMICOLON, "Expected ';' after drawnum statement");
@@ -1169,16 +1147,14 @@ std::unique_ptr<ForNode> Parser::parse_for_statement() {
         assignment->name = current().value;
         advance();
         expect(TokenType::ASSIGN, "Expected '=' in for init");
-        assignment->value = std::unique_ptr<ExprNode>(
-            dynamic_cast<ExprNode*>(parse_expression().release()));
+        assignment->value = parse_expression();
         expect(TokenType::SEMICOLON, "Expected ';' after for init");
         for_node->init = std::move(assignment);
     } else {
         expect(TokenType::SEMICOLON, "Expected init statement or ';'");
     }
 
-    for_node->condition = std::unique_ptr<ExprNode>(
-        dynamic_cast<ExprNode*>(parse_condition().release()));
+    for_node->condition = parse_condition();
     expect(TokenType::SEMICOLON, "Expected ';' after for condition");
 
     if (check(TokenType::IDENTIFIER)) {
@@ -1226,7 +1202,7 @@ std::unique_ptr<ForNode> Parser::parse_for_statement() {
             expect(TokenType::ASSIGN, "Expected '=', '++', '--', or compound assignment in for-loop increment");
         }
         
-        auto rhs = std::unique_ptr<ExprNode>(dynamic_cast<ExprNode*>(parse_expression().release()));
+        auto rhs = parse_expression();
         
         if (compound_op != TokenType::ASSIGN) {
             auto var_ref = std::make_unique<VariableExprNode>();
