@@ -1,4 +1,6 @@
 #include <chip8/compiler/compiler.h>
+#include <chip8/compiler/preprocessor.h>
+#include <chip8/compiler/optimizer.h>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -20,16 +22,25 @@ void Compiler::compile(const std::string &source_file, const std::string &output
             errorHandler.error("Could not open source file " + source_file, 0, 0);
             return;
         }
-
-        std::stringstream buffer;
-        buffer << input.rdbuf();
-        std::string source = buffer.str();
         input.close();
 
         if (debug_mode) {
             std::cout << "Compiling " << source_file << " to " << output_file << std::endl;
         }
-        
+
+        // Preprocess (#include, #define)
+        Preprocessor preprocessor;
+        std::string source = preprocessor.processFile(source_file);
+        if (preprocessor.hasErrors()) {
+            for (const auto& err : preprocessor.getErrors()) {
+                errorHandler.error(err, 0, 0);
+            }
+            for (const auto& error : errorHandler.getErrors()) {
+                std::cerr << error.format();
+            }
+            return;
+        }
+
         errorHandler.setSource(source);
 
         std::vector<Token> tokens = lexer.tokenize(source);
@@ -56,6 +67,16 @@ void Compiler::compile(const std::string &source_file, const std::string &output
 
         if (debug_mode) {
             std::cout << "Parsing complete" << std::endl;
+        }
+
+        // AST-level optimizations (constant folding, dead code elimination)
+        Optimizer optimizer;
+        optimizer.optimize(*ast);
+
+        if (debug_mode) {
+            std::cout << "Optimization complete: " << optimizer.getConstantsFolded()
+                      << " constants folded, " << optimizer.getDeadCodeRemoved()
+                      << " dead statements removed" << std::endl;
         }
 
         std::vector<uint8_t> output = codeGen->generate(*ast);
