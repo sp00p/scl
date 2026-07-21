@@ -3,6 +3,86 @@
 
 namespace chip8::compiler {
 
+// Deep copy of an expression tree. Needed when an expression must be evaluated
+// twice, e.g. the index in "arr[i+1] += 2" is used for both the read and the write.
+static std::unique_ptr<ExprNode> clone_expr(const ExprNode* expr) {
+    if (!expr) return nullptr;
+
+    std::unique_ptr<ExprNode> copy;
+    if (auto* n = dynamic_cast<const NumberExprNode*>(expr)) {
+        auto c = std::make_unique<NumberExprNode>();
+        c->value = n->value;
+        copy = std::move(c);
+    } else if (auto* v = dynamic_cast<const VariableExprNode*>(expr)) {
+        auto c = std::make_unique<VariableExprNode>();
+        c->name = v->name;
+        copy = std::move(c);
+    } else if (auto* s = dynamic_cast<const StringExprNode*>(expr)) {
+        auto c = std::make_unique<StringExprNode>();
+        c->value = s->value;
+        copy = std::move(c);
+    } else if (auto* b = dynamic_cast<const BinaryExprNode*>(expr)) {
+        auto c = std::make_unique<BinaryExprNode>();
+        c->op = b->op;
+        c->left = clone_expr(b->left.get());
+        c->right = clone_expr(b->right.get());
+        copy = std::move(c);
+    } else if (auto* cond = dynamic_cast<const ConditionNode*>(expr)) {
+        auto c = std::make_unique<ConditionNode>();
+        c->op = cond->op;
+        c->left = clone_expr(cond->left.get());
+        c->right = clone_expr(cond->right.get());
+        copy = std::move(c);
+    } else if (auto* l = dynamic_cast<const LogicalExprNode*>(expr)) {
+        auto c = std::make_unique<LogicalExprNode>();
+        c->op = l->op;
+        c->left = clone_expr(l->left.get());
+        c->right = clone_expr(l->right.get());
+        copy = std::move(c);
+    } else if (auto* u = dynamic_cast<const UnaryExprNode*>(expr)) {
+        auto c = std::make_unique<UnaryExprNode>();
+        c->op = u->op;
+        c->operand = clone_expr(u->operand.get());
+        copy = std::move(c);
+    } else if (auto* k = dynamic_cast<const KeyExprNode*>(expr)) {
+        auto c = std::make_unique<KeyExprNode>();
+        c->key_num = clone_expr(k->key_num.get());
+        copy = std::move(c);
+    } else if (auto* r = dynamic_cast<const RandExprNode*>(expr)) {
+        auto c = std::make_unique<RandExprNode>();
+        c->max_val = clone_expr(r->max_val.get());
+        copy = std::move(c);
+    } else if (dynamic_cast<const WaitKeyExprNode*>(expr)) {
+        copy = std::make_unique<WaitKeyExprNode>();
+    } else if (dynamic_cast<const CollisionExprNode*>(expr)) {
+        copy = std::make_unique<CollisionExprNode>();
+    } else if (dynamic_cast<const TimerExprNode*>(expr)) {
+        copy = std::make_unique<TimerExprNode>();
+    } else if (auto* a = dynamic_cast<const ArrayAccessExprNode*>(expr)) {
+        auto c = std::make_unique<ArrayAccessExprNode>();
+        c->array_name = a->array_name;
+        for (const auto& idx : a->indices) c->indices.push_back(clone_expr(idx.get()));
+        copy = std::move(c);
+    } else if (auto* f = dynamic_cast<const FunctionCallExprNode*>(expr)) {
+        auto c = std::make_unique<FunctionCallExprNode>();
+        c->function_name = f->function_name;
+        for (const auto& arg : f->arguments) c->arguments.push_back(clone_expr(arg.get()));
+        copy = std::move(c);
+    } else if (auto* e = dynamic_cast<const EntityFieldAccessExpr*>(expr)) {
+        auto c = std::make_unique<EntityFieldAccessExpr>();
+        c->entity_name = e->entity_name;
+        c->field_name = e->field_name;
+        c->index = clone_expr(e->index.get());
+        copy = std::move(c);
+    } else {
+        throw std::runtime_error("Internal error: cannot clone expression node");
+    }
+
+    copy->line = expr->line;
+    copy->column = expr->column;
+    return copy;
+}
+
 Parser::Parser(chip8::compiler::ErrorHandler &errorHandler)
     : tokens(nullptr), current_token(0), errorHandler(errorHandler) {
 }
@@ -263,19 +343,7 @@ std::unique_ptr<ASTNode> Parser::parse_assignment_or_call() {
             arr_ref->line = arr_assign->line;
             arr_ref->column = arr_assign->column;
             for (auto& idx : arr_assign->indices) {
-                if (auto* num = dynamic_cast<NumberExprNode*>(idx.get())) {
-                    auto num_copy = std::make_unique<NumberExprNode>();
-                    num_copy->value = num->value;
-                    arr_ref->indices.push_back(std::move(num_copy));
-                } else if (auto* var = dynamic_cast<VariableExprNode*>(idx.get())) {
-                    auto var_copy = std::make_unique<VariableExprNode>();
-                    var_copy->name = var->name;
-                    arr_ref->indices.push_back(std::move(var_copy));
-                } else {
-                    auto num_copy = std::make_unique<NumberExprNode>();
-                    num_copy->value = 0;
-                    arr_ref->indices.push_back(std::move(num_copy));
-                }
+                arr_ref->indices.push_back(clone_expr(idx.get()));
             }
 
             auto one = std::make_unique<NumberExprNode>();
@@ -312,19 +380,7 @@ std::unique_ptr<ASTNode> Parser::parse_assignment_or_call() {
             arr_ref->line = arr_assign->line;
             arr_ref->column = arr_assign->column;
             for (auto& idx : arr_assign->indices) {
-                if (auto* num = dynamic_cast<NumberExprNode*>(idx.get())) {
-                    auto num_copy = std::make_unique<NumberExprNode>();
-                    num_copy->value = num->value;
-                    arr_ref->indices.push_back(std::move(num_copy));
-                } else if (auto* var = dynamic_cast<VariableExprNode*>(idx.get())) {
-                    auto var_copy = std::make_unique<VariableExprNode>();
-                    var_copy->name = var->name;
-                    arr_ref->indices.push_back(std::move(var_copy));
-                } else {
-                    auto num_copy = std::make_unique<NumberExprNode>();
-                    num_copy->value = 0;
-                    arr_ref->indices.push_back(std::move(num_copy));
-                }
+                arr_ref->indices.push_back(clone_expr(idx.get()));
             }
 
             auto bin_expr = std::make_unique<BinaryExprNode>();
@@ -495,6 +551,15 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
     int line = current().line;
     int col = current().column;
 
+    if (check(TokenType::LPAREN)) {
+        advance();
+        // Full condition grammar inside parens so both (x + 1) and (a < b) work
+        auto expr = std::unique_ptr<ExprNode>(
+            dynamic_cast<ExprNode*>(parse_condition().release()));
+        expect(TokenType::RPAREN, "Expected ')' after expression");
+        return expr;
+    }
+
     if (check(TokenType::NUMBER)) {
         auto num = std::make_unique<NumberExprNode>();
         num->line = line;
@@ -525,7 +590,8 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
         auto key_expr = std::make_unique<KeyExprNode>();
         key_expr->line = line;
         key_expr->column = col;
-        key_expr->key_num = parse_primary_expression();
+        key_expr->key_num = std::unique_ptr<ExprNode>(
+            dynamic_cast<ExprNode*>(parse_expression().release()));
         expect(TokenType::RPAREN, "Expected ')' after key number");
         return key_expr;
     }
@@ -544,7 +610,8 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
         auto rand_expr = std::make_unique<RandExprNode>();
         rand_expr->line = line;
         rand_expr->column = col;
-        rand_expr->max_val = parse_primary_expression();
+        rand_expr->max_val = std::unique_ptr<ExprNode>(
+            dynamic_cast<ExprNode*>(parse_expression().release()));
         expect(TokenType::RPAREN, "Expected ')' after rand max");
         return rand_expr;
     }
@@ -595,7 +662,8 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
         std::unique_ptr<ExprNode> index = nullptr;
         if (check(TokenType::LBRACKET)) {
             advance();
-            index = parse_primary_expression();
+            index = std::unique_ptr<ExprNode>(
+                dynamic_cast<ExprNode*>(parse_expression().release()));
             expect(TokenType::RBRACKET, "Expected ']' after index");
         }
         
@@ -622,7 +690,8 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
             
             while (check(TokenType::LBRACKET)) {
                 advance();
-                arr_access->indices.push_back(parse_primary_expression());
+                arr_access->indices.push_back(std::unique_ptr<ExprNode>(
+                    dynamic_cast<ExprNode*>(parse_expression().release())));
                 expect(TokenType::RBRACKET, "Expected ']' after array index");
             }
             return arr_access;
@@ -639,23 +708,74 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
     return nullptr;
 }
 
+// Expression grammar with C-style operator precedence (lowest to highest):
+//   |  ^  &  + -  * /  primary
 std::unique_ptr<ASTNode> Parser::parse_expression() {
-    auto left = parse_primary_expression();
+    return parse_bitwise_or();
+}
 
-    while (check(TokenType::PLUS) || check(TokenType::MINUS) ||
-           check(TokenType::MULTIPLY) || check(TokenType::DIVIDE) ||
-           check(TokenType::AMPERSAND) || check(TokenType::PIPE) ||
-           check(TokenType::CARET)) {
-        auto bin_expr = std::make_unique<BinaryExprNode>();
-        bin_expr->line = current().line;
-        bin_expr->column = current().column;
-        bin_expr->left = std::move(left);
-        bin_expr->op = current().type;
+// Helper to build a left-associative binary operator level
+static std::unique_ptr<ExprNode> make_binary(std::unique_ptr<ExprNode> left,
+                                             TokenType op, int line, int col,
+                                             std::unique_ptr<ExprNode> right) {
+    auto bin_expr = std::make_unique<BinaryExprNode>();
+    bin_expr->line = line;
+    bin_expr->column = col;
+    bin_expr->left = std::move(left);
+    bin_expr->op = op;
+    bin_expr->right = std::move(right);
+    return bin_expr;
+}
+
+std::unique_ptr<ExprNode> Parser::parse_bitwise_or() {
+    auto left = parse_bitwise_xor();
+    while (check(TokenType::PIPE)) {
+        int line = current().line, col = current().column;
         advance();
-        bin_expr->right = parse_primary_expression();
-        left = std::move(bin_expr);
+        left = make_binary(std::move(left), TokenType::PIPE, line, col, parse_bitwise_xor());
     }
+    return left;
+}
 
+std::unique_ptr<ExprNode> Parser::parse_bitwise_xor() {
+    auto left = parse_bitwise_and();
+    while (check(TokenType::CARET)) {
+        int line = current().line, col = current().column;
+        advance();
+        left = make_binary(std::move(left), TokenType::CARET, line, col, parse_bitwise_and());
+    }
+    return left;
+}
+
+std::unique_ptr<ExprNode> Parser::parse_bitwise_and() {
+    auto left = parse_additive();
+    while (check(TokenType::AMPERSAND)) {
+        int line = current().line, col = current().column;
+        advance();
+        left = make_binary(std::move(left), TokenType::AMPERSAND, line, col, parse_additive());
+    }
+    return left;
+}
+
+std::unique_ptr<ExprNode> Parser::parse_additive() {
+    auto left = parse_multiplicative();
+    while (check(TokenType::PLUS) || check(TokenType::MINUS)) {
+        TokenType op = current().type;
+        int line = current().line, col = current().column;
+        advance();
+        left = make_binary(std::move(left), op, line, col, parse_multiplicative());
+    }
+    return left;
+}
+
+std::unique_ptr<ExprNode> Parser::parse_multiplicative() {
+    auto left = parse_primary_expression();
+    while (check(TokenType::MULTIPLY) || check(TokenType::DIVIDE)) {
+        TokenType op = current().type;
+        int line = current().line, col = current().column;
+        advance();
+        left = make_binary(std::move(left), op, line, col, parse_primary_expression());
+    }
     return left;
 }
 
@@ -676,14 +796,12 @@ std::unique_ptr<ExprNode> Parser::parse_comparison() {
 
         condition->right = std::unique_ptr<ExprNode>(
             dynamic_cast<ExprNode*>(parse_expression().release()));
-    } else {
-        condition->op = TokenType::NOT_EQUALS;
-        auto zero = std::make_unique<NumberExprNode>();
-        zero->value = 0;
-        condition->right = std::move(zero);
+        return condition;
     }
 
-    return condition;
+    // No comparison operator: return the bare expression. Contexts that
+    // branch (if/while/&&/||) already test for truthiness (value != 0).
+    return std::unique_ptr<ExprNode>(condition->left.release());
 }
 
 std::unique_ptr<ASTNode> Parser::parse_condition() {
@@ -1069,7 +1187,34 @@ std::unique_ptr<ForNode> Parser::parse_for_statement() {
         assignment->column = current().column;
         assignment->name = current().value;
         advance();
-        
+
+        // i++ / i-- shorthand: desugar to i = i +/- 1
+        if (check(TokenType::PLUS_PLUS) || check(TokenType::MINUS_MINUS)) {
+            bool is_increment = check(TokenType::PLUS_PLUS);
+            advance();
+
+            auto var_ref = std::make_unique<VariableExprNode>();
+            var_ref->name = assignment->name;
+            var_ref->line = assignment->line;
+            var_ref->column = assignment->column;
+
+            auto one = std::make_unique<NumberExprNode>();
+            one->value = 1;
+
+            auto bin_expr = std::make_unique<BinaryExprNode>();
+            bin_expr->line = assignment->line;
+            bin_expr->column = assignment->column;
+            bin_expr->left = std::move(var_ref);
+            bin_expr->right = std::move(one);
+            bin_expr->op = is_increment ? TokenType::PLUS : TokenType::MINUS;
+
+            assignment->value = std::move(bin_expr);
+            for_node->increment = std::move(assignment);
+            expect(TokenType::RPAREN, "Expected ')' after for");
+            for_node->body = parse_block();
+            return for_node;
+        }
+
         TokenType compound_op = TokenType::ASSIGN;
         if (check(TokenType::PLUS_ASSIGN) || check(TokenType::MINUS_ASSIGN) ||
             check(TokenType::MULTIPLY_ASSIGN) || check(TokenType::DIVIDE_ASSIGN) ||
@@ -1078,7 +1223,7 @@ std::unique_ptr<ForNode> Parser::parse_for_statement() {
             compound_op = current().type;
             advance();
         } else {
-            expect(TokenType::ASSIGN, "Expected '=' or compound assignment in increment");
+            expect(TokenType::ASSIGN, "Expected '=', '++', '--', or compound assignment in for-loop increment");
         }
         
         auto rhs = std::unique_ptr<ExprNode>(dynamic_cast<ExprNode*>(parse_expression().release()));

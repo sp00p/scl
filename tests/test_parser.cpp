@@ -215,10 +215,10 @@ TEST_F(ParserTest, ParsesKeyExpression) {
     auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
     auto* block = dynamic_cast<BlockNode*>(func->body.get());
     auto* if_node = dynamic_cast<IfNode*>(block->statements[1].get());
-    auto* condition = dynamic_cast<ConditionNode*>(if_node->condition.get());
-    
-    // The condition's left side should be a KeyExprNode (compared to 0)
-    auto* key_expr = dynamic_cast<KeyExprNode*>(condition->left.get());
+
+    // A bare expression condition is used directly (truthiness is tested at
+    // codegen time), so the condition should be the KeyExprNode itself
+    auto* key_expr = dynamic_cast<KeyExprNode*>(if_node->condition.get());
     ASSERT_NE(key_expr, nullptr);
 }
 
