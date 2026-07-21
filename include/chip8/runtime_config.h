@@ -22,6 +22,10 @@ struct Quirks {
     bool jump_vx = false;
     bool clip_sprites = true;
     bool schip_mode = false;
+    // Original CHIP-8 waits for the 60Hz vblank before each draw, limiting
+    // to one sprite per frame. Off by default: compiler-generated games draw
+    // many sprites per frame and would slow to a crawl.
+    bool display_wait = false;
 };
 
 struct Colors {

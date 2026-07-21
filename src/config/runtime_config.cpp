@@ -100,6 +100,7 @@ bool RuntimeConfig::load(const std::string& filepath) {
                 else if (key == "index_increment") quirks.index_increment = parseBool(value);
                 else if (key == "jump_vx") quirks.jump_vx = parseBool(value);
                 else if (key == "clip_sprites") quirks.clip_sprites = parseBool(value);
+                else if (key == "display_wait") quirks.display_wait = parseBool(value);
                 else if (key == "schip_mode") quirks.schip_mode = parseBool(value);
             }
             else if (section == "colors") {
@@ -153,6 +154,7 @@ bool RuntimeConfig::save(const std::string& filepath) const {
     file << "index_increment = " << (quirks.index_increment ? "true" : "false") << "\n";
     file << "jump_vx = " << (quirks.jump_vx ? "true" : "false") << "\n";
     file << "clip_sprites = " << (quirks.clip_sprites ? "true" : "false") << "\n";
+    file << "display_wait = " << (quirks.display_wait ? "true" : "false") << "\n";
     file << "schip_mode = " << (quirks.schip_mode ? "true" : "false") << "\n";
     file << "\n";
     
