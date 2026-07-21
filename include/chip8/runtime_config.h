@@ -36,7 +36,11 @@ struct KeyMapping {
 };
 
 struct Timing {
-    int instructions_per_frame = 16;
+    // Instructions executed per 60Hz frame. Compiler-generated SCL games can
+    // take a few thousand instructions per game frame and pace themselves via
+    // wait()/delay-timer loops, so a high value keeps them smooth without
+    // breaking timer-paced hand-written ROMs.
+    int instructions_per_frame = 500;
     int target_fps = 60;
 };
 

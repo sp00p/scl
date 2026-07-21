@@ -19,8 +19,8 @@
 
 void print_usage(const char* program_name) {
     std::cerr << "Usage:\n"
-              << "  " << program_name << " run <rom_file>              - Run a CHIP-8 ROM\n"
-              << "  " << program_name << " debug <rom_file>            - Run with debug UI\n"
+              << "  " << program_name << " run <rom_file> [--schip]    - Run a CHIP-8 ROM\n"
+              << "  " << program_name << " debug <rom_file> [--schip]  - Run with debug UI\n"
               << "  " << program_name << " compile <source> <output>   - Compile SCL to CHIP-8\n"
               << "  " << program_name << " disasm <rom_file> [output]  - Disassemble a CHIP-8 ROM\n"
               << "  " << program_name << " decompile <rom_file>        - Decompile ROM to pseudo-code\n";
@@ -60,9 +60,10 @@ int run_decompiler(const std::string& rom_file) {
     }
 }
 
-int run_emulator(const std::string& rom_file, bool debug_mode) {
+int run_emulator(const std::string& rom_file, bool debug_mode, bool schip_mode = false) {
     try {
         Chip8 chip8;
+        chip8.setSchipMode(schip_mode);
         chip8.loadROM(rom_file);
         
         // Add ROM to recent list and save config
@@ -126,10 +127,17 @@ int run_emulator(const std::string& rom_file, bool debug_mode) {
                 bool should_execute = !debug_mode || !debug_ui.isPaused() || debug_ui.shouldStep();
                 
                 if (should_execute) {
-                    int cycles = (debug_mode && debug_ui.isPaused()) ? 1 : chip8::config::INSTRUCTIONS_PER_UPDATE;
+                    int cycles = (debug_mode && debug_ui.isPaused()) ? 1
+                        : chip8::getConfig().timing.instructions_per_frame;
                     for (int i = 0; i < cycles; i++) {
                         chip8.emulateCycle();
-                        
+
+                        // SCHIP EXIT opcode (00FD) requests emulator shutdown
+                        if (chip8.shouldExit()) {
+                            quit = true;
+                            break;
+                        }
+
                         // Check for breakpoints after each instruction
                         if (debug_mode && debug_ui.isBreakpoint(chip8.getPC(), &chip8)) {
                             debug_ui.pause();
@@ -174,20 +182,23 @@ int main(int argc, char* argv[]) {
 
     std::string command = argv[1];
 
-    if (command == "run") {
+    if (command == "run" || command == "debug") {
         if (argc < 3) {
-            std::cerr << "Error: ROM file required for 'run' command\n";
+            std::cerr << "Error: ROM file required for '" << command << "' command\n";
             print_usage(argv[0]);
             return 1;
         }
-        return run_emulator(argv[2], false);
-    } else if (command == "debug") {
-        if (argc < 3) {
-            std::cerr << "Error: ROM file required for 'debug' command\n";
-            print_usage(argv[0]);
-            return 1;
+        bool schip = false;
+        for (int i = 3; i < argc; i++) {
+            if (std::string(argv[i]) == "--schip") {
+                schip = true;
+            } else {
+                std::cerr << "Unknown option: " << argv[i] << "\n";
+                print_usage(argv[0]);
+                return 1;
+            }
         }
-        return run_emulator(argv[2], true);
+        return run_emulator(argv[2], command == "debug", schip);
     } else if (command == "compile") {
         if (argc < 4) {
             std::cerr << "Error: source and output files required for 'compile' command\n";

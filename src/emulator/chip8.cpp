@@ -78,6 +78,11 @@ Chip8::Chip8()
 
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) {
+        // Fall back to any available renderer (e.g. software) so the emulator
+        // still works without GPU acceleration or in headless environments
+        renderer = SDL_CreateRenderer(window, -1, 0);
+    }
+    if (!renderer) {
         throw std::runtime_error("Renderer creation failed: " + std::string(SDL_GetError()));
     }
 
