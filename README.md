@@ -134,6 +134,26 @@ scl compile examples/snake.scl snake.ch8
 scl run snake.ch8
 ```
 
+## Configuration
+
+Emulator settings (quirks, key bindings, colors, emulation speed) persist in
+`~/.config/scl/config.ini` (Linux/macOS) or `%APPDATA%\scl\config.ini`
+(Windows). See [docs/EMULATOR.md](docs/EMULATOR.md#configuration) for the
+available options.
+
+## Tests
+
+Four GoogleTest suites cover the lexer, parser, code generator, and an
+end-to-end integration suite that compiles SCL programs and executes them on
+the emulator core:
+
+```bash
+cd build && ctest
+# or run individually: ./test_lexer ./test_parser ./test_codegen ./test_integration
+```
+
+The integration tests run headless (`SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`).
+
 ## Docs
 
 - [SCL Language Reference](docs/SCL.md)

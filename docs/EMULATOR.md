@@ -51,7 +51,11 @@ The debug window (opened with `debug` command) shows registers, stack, memory, a
 - Expressions: `V0 + V1`, `VF * 2`
 
 **Source Mapping:**
-When debugging compiled SCL programs, the disassembly shows the original source lines alongside the generated opcodes.
+`scl compile` writes a `<rom>.map` file next to the ROM. When you run
+`scl debug rom.ch8`, the debugger automatically loads `rom.ch8.map` and shows
+a source panel with the original SCL code: the current line follows the PC,
+lines can be clicked to set breakpoints, and hovering disassembly highlights
+the matching source line (and vice versa).
 
 **ROM Browser:**
 Browse and load ROMs directly from the debug window without restarting.
@@ -73,8 +77,41 @@ CHIP-8 interpreters vary in behavior. This emulator defaults to original COSMAC 
 - **Shift**: 8XY6/8XYE shift VY, not VX
 - **Index Increment**: FX55/FX65 increment I
 - **Sprite Clipping**: Sprites clip at screen edge, don't wrap
+- **Display Wait** (off by default): original hardware waited for the 60Hz
+  vblank before each draw, limiting output to one sprite per frame. Enable
+  `display_wait = true` for cycle-accurate behavior with old ROMs; leave it
+  off for compiled SCL games, which draw many sprites per frame.
 
 These can be toggled in the config file.
+
+## Configuration
+
+Settings persist in a config file (`~/.config/scl/config.ini` on Linux/macOS,
+`%APPDATA%\scl\config.ini` on Windows), written automatically on first run:
+
+```ini
+[quirks]
+vf_reset = true
+shift_vy = true
+index_increment = true
+jump_vx = false
+clip_sprites = true
+schip_mode = false
+display_wait = false
+
+[timing]
+instructions_per_frame = 500   ; emulation speed (x 60Hz = instructions/sec)
+target_fps = 60
+
+[keys]
+key_0 = 45   ; SDL scancodes for the 16-key pad
+...
+```
+
+`instructions_per_frame` is the main speed knob. The default of 500
+(30,000 instructions/sec) keeps compiled SCL games smooth; lower it toward
+10-20 for old ROMs that pace themselves by instruction speed rather than the
+delay timer.
 
 ## Memory
 
@@ -85,7 +122,8 @@ These can be toggled in the config file.
 
 ## Timing
 
-~500 instructions/sec, 60Hz timers and display.
+`instructions_per_frame` x 60 instructions/sec (default 30,000), with 60Hz
+timers and display updates.
 
 ## Super CHIP-8
 

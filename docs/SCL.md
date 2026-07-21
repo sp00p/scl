@@ -6,13 +6,15 @@ SCL (Simple CHIP-8 Language) is a C-like language that compiles to CHIP-8 byteco
 
 ```bash
 # Compile an SCL file to a CHIP-8 ROM
+# (also writes game.ch8.map, a source map used by the debugger)
 scl compile game.scl game.ch8
 
 # Run the compiled ROM
 scl run game.ch8
 
-# Compile and run in one step (debug mode)
-scl debug game.scl
+# Run with the debugger; auto-loads game.ch8.map so you can step
+# through and set breakpoints in your original SCL source
+scl debug game.ch8
 ```
 
 ## Quick Reference
@@ -190,6 +192,29 @@ Note: All arithmetic wraps at 8 bits (0-255). Division is integer division.
 | `!` | Logical NOT | `!flag` |
 | `&&` | Logical AND | `a && b` |
 | `\|\|` | Logical OR | `a \|\| b` |
+
+### Precedence and Parentheses
+
+Operators follow C-style precedence, highest first:
+
+1. `!`, function calls, array indexing, `( )`
+2. `*` `/`
+3. `+` `-`
+4. `&`
+5. `^`
+6. `\|`
+7. `==` `!=` `<` `>` `<=` `>=`
+8. `&&` `\|\|`
+
+Use parentheses to group subexpressions:
+
+```c
+byte x = (i & 7) * 8 + 2;     // mask, then multiply, then add
+if ((a < b && c) || done) { } // parens work in conditions too
+```
+
+Multiplication and division by powers of two compile to fast shift
+instructions; other multiplies/divides use small runtime loops.
 
 ## Control Flow
 
@@ -504,7 +529,23 @@ void main() {
 }
 ```
 
-Included files are processed before compilation, allowing you to organize code across multiple files.
+Included files are processed before compilation, allowing you to organize
+code across multiple files. Paths resolve relative to the including file;
+circular includes are detected and skipped.
+
+### #define
+Simple text macros (no parameters):
+```c
+#define SPEED 2
+#define DEBUG          // defined as 1 when no value given
+
+void main() {
+    byte x = SPEED;    // expands to: byte x = 2;
+}
+```
+
+Note: with `#include`, reported error line numbers refer to the combined
+preprocessed source, so they may be offset from the original file.
 
 ## Inline Assembly
 
