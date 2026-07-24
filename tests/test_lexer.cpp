@@ -178,3 +178,26 @@ TEST_F(LexerTest, EndsWithEOF) {
     ASSERT_FALSE(tokens.empty());
     EXPECT_EQ(tokens.back().type, TokenType::END_OF_FILE);
 }
+
+// New operator tokens: %, <<, >>
+TEST_F(LexerTest, TokenizesModulo) {
+    auto tokens = lexer.tokenize("a % b");
+    ASSERT_GE(tokens.size(), 3);
+    EXPECT_EQ(tokens[1].type, TokenType::MODULO);
+}
+
+TEST_F(LexerTest, TokenizesShiftOperators) {
+    auto tokens = lexer.tokenize("a << 2 >> 1");
+    ASSERT_GE(tokens.size(), 5);
+    EXPECT_EQ(tokens[1].type, TokenType::SHIFT_LEFT);
+    EXPECT_EQ(tokens[3].type, TokenType::SHIFT_RIGHT);
+}
+
+TEST_F(LexerTest, ShiftDoesNotBreakComparisons) {
+    auto tokens = lexer.tokenize("a < b <= c > d >= e");
+    ASSERT_GE(tokens.size(), 9);
+    EXPECT_EQ(tokens[1].type, TokenType::LESS_THAN);
+    EXPECT_EQ(tokens[3].type, TokenType::LESS_EQUAL);
+    EXPECT_EQ(tokens[5].type, TokenType::GREATER_THAN);
+    EXPECT_EQ(tokens[7].type, TokenType::GREATER_EQUAL);
+}

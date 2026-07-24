@@ -438,3 +438,118 @@ TEST_F(WarningTest, ErrorFormatsWithSourceLine) {
     std::string formatted = err.format();
     EXPECT_TRUE(formatted.find("error:") != std::string::npos);
 }
+
+// --- Strength reduction and new operators ---
+
+// Multiply by a constant uses shift-add decomposition (SHL present, no loop)
+TEST_F(CodeGenTest, MultiplyByConstUsesShifts) {
+    auto rom = compile("void main() { byte a; byte b; a = 7; b = a * 10; }");
+    ASSERT_FALSE(rom.empty());
+    int shl_count = 0;
+    for (size_t i = 0; i + 1 < rom.size(); i += 2) {
+        if ((opcodeAt(rom, i) & 0xF00F) == 0x800E) shl_count++;
+    }
+    EXPECT_GE(shl_count, 2); // x*10 needs at least 2 shifts
+}
+
+// Modulo by a power of two compiles to a single AND
+TEST_F(CodeGenTest, ModuloPow2UsesAnd) {
+    auto rom = compile("void main() { byte a; byte b; a = 23; b = a % 8; }");
+    ASSERT_FALSE(rom.empty());
+    bool found_and = false;
+    for (size_t i = 0; i + 1 < rom.size(); i += 2) {
+        if ((opcodeAt(rom, i) & 0xF00F) == 0x8002) found_and = true;
+    }
+    EXPECT_TRUE(found_and);
+}
+
+// Constant shift counts unroll into shift instructions
+TEST_F(CodeGenTest, ConstShiftUnrolls) {
+    auto rom = compile("void main() { byte a; byte b; a = 3; b = a << 3; }");
+    ASSERT_FALSE(rom.empty());
+    int shl_count = 0;
+    for (size_t i = 0; i + 1 < rom.size(); i += 2) {
+        if ((opcodeAt(rom, i) & 0xF00F) == 0x800E) shl_count++;
+    }
+    EXPECT_GE(shl_count, 3);
+}
+
+// --- Branch fusion ---
+
+// if (a == const) uses the SE Vx, kk immediate skip - no boolean materialization
+TEST_F(CodeGenTest, BranchFusionEqualConstUsesImmediateSkip) {
+    auto rom = compile("void main() { byte a; a = 4; if (a == 5) { a = 1; } }");
+    ASSERT_FALSE(rom.empty());
+    bool found = false;
+    for (size_t i = 0; i + 1 < rom.size(); i += 2) {
+        if (opcodeAt(rom, i) == 0x3105 || opcodeAt(rom, i) == 0x3205) found = true; // SE Vx, 5
+    }
+    EXPECT_TRUE(found);
+}
+
+// if (a == b) uses the SE Vx, Vy register skip
+TEST_F(CodeGenTest, BranchFusionEqualRegUsesRegisterSkip) {
+    auto rom = compile("void main() { byte a; byte b; a = 1; b = 2; if (a == b) { a = 3; } }");
+    ASSERT_FALSE(rom.empty());
+    bool found = false;
+    for (size_t i = 0; i + 1 < rom.size(); i += 2) {
+        if ((opcodeAt(rom, i) & 0xF00F) == 0x5000) found = true; // SE Vx, Vy
+    }
+    EXPECT_TRUE(found);
+}
+
+// while(1) emits no condition check at all
+TEST_F(CodeGenTest, WhileOneHasNoConditionCheck) {
+    auto rom_inf = compile("void main() { byte a; a = 0; while (1) { a = a + 1; } }");
+    auto rom_cond = compile("void main() { byte a; a = 0; while (a < 5) { a = a + 1; } }");
+    ASSERT_FALSE(rom_inf.empty());
+    ASSERT_FALSE(rom_cond.empty());
+    EXPECT_LT(rom_inf.size(), rom_cond.size()); // no test emitted for while(1)
+}
+
+// --- Const ROM tables ---
+
+// Table bytes are emitted into the ROM and reads use LD I / ADD I / LD V0,[I]
+TEST_F(CodeGenTest, ConstTableEmitsDataAndIndexedRead) {
+    auto rom = compile("const byte tbl[] = { 0xAA, 0xBB, 0xCC }; "
+                       "void main() { byte i; byte v; i = 1; v = tbl[i]; }");
+    ASSERT_FALSE(rom.empty());
+    // Data bytes present consecutively
+    bool data_found = false;
+    for (size_t i = 0; i + 2 < rom.size(); i++) {
+        if (rom[i] == 0xAA && rom[i+1] == 0xBB && rom[i+2] == 0xCC) data_found = true;
+    }
+    EXPECT_TRUE(data_found);
+    // Indexed read sequence: ADD I, V0 (F01E) then LD V0, [I] (F065)
+    bool read_found = false;
+    for (size_t i = 0; i + 3 < rom.size(); i += 2) {
+        if (opcodeAt(rom, i) == 0xF01E && opcodeAt(rom, i + 2) == 0xF065) read_found = true;
+    }
+    EXPECT_TRUE(read_found);
+}
+
+// Writing to a const table is a compile error
+TEST_F(CodeGenTest, ConstTableWriteIsError) {
+    bool rejected = false;
+    try {
+        compile("const byte tbl[] = { 1, 2 }; void main() { tbl[0] = 9; }");
+        rejected = errorHandler.hasErrors();
+    } catch (const std::exception&) {
+        rejected = true; // error handler configured to throw
+    }
+    EXPECT_TRUE(rejected);
+}
+
+// Sprite/table data must survive the peephole pass intact
+TEST_F(CodeGenTest, PeepholeDoesNotRewriteData) {
+    // 0x70 0x00 looks like ADD V0,0 (a peephole no-op pattern); it must
+    // survive inside sprite data
+    auto rom = compile("sprite s[2] = { 0x70, 0x00 }; "
+                       "void main() { byte x; x = 1; x = 2; draw(0, 0, 2, s); }");
+    ASSERT_FALSE(rom.empty());
+    bool data_found = false;
+    for (size_t i = 0; i + 1 < rom.size(); i++) {
+        if (rom[i] == 0x70 && rom[i+1] == 0x00) data_found = true;
+    }
+    EXPECT_TRUE(data_found);
+}

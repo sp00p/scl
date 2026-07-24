@@ -326,3 +326,119 @@ TEST_F(ParserTest, ParsesBitwiseXor) {
     ASSERT_NE(bin_expr, nullptr);
     EXPECT_EQ(bin_expr->op, TokenType::CARET);
 }
+
+// Operator precedence: 2 + 3 * 4 parses as 2 + (3 * 4)
+TEST_F(ParserTest, MultiplyBindsTighterThanAdd) {
+    auto program = parse("void main() { byte x; x = 2 + 3 * 4; }");
+    auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
+    auto* block = dynamic_cast<BlockNode*>(func->body.get());
+    auto* assign = dynamic_cast<AssignmentNode*>(block->statements[1].get());
+    ASSERT_NE(assign, nullptr);
+
+    auto* top = dynamic_cast<BinaryExprNode*>(assign->value.get());
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(top->op, TokenType::PLUS);
+    auto* right = dynamic_cast<BinaryExprNode*>(top->right.get());
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(right->op, TokenType::MULTIPLY);
+}
+
+// Parentheses override precedence: (2 + 3) * 4
+TEST_F(ParserTest, ParenthesesOverridePrecedence) {
+    auto program = parse("void main() { byte x; x = (2 + 3) * 4; }");
+    auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
+    auto* block = dynamic_cast<BlockNode*>(func->body.get());
+    auto* assign = dynamic_cast<AssignmentNode*>(block->statements[1].get());
+    ASSERT_NE(assign, nullptr);
+
+    auto* top = dynamic_cast<BinaryExprNode*>(assign->value.get());
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(top->op, TokenType::MULTIPLY);
+    auto* left = dynamic_cast<BinaryExprNode*>(top->left.get());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left->op, TokenType::PLUS);
+}
+
+// Shifts bind looser than additive: a << 1 + 2 is a << (1 + 2)
+TEST_F(ParserTest, ShiftBindsLooserThanAdd) {
+    auto program = parse("void main() { byte a; byte x; x = a << 1 + 2; }");
+    auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
+    auto* block = dynamic_cast<BlockNode*>(func->body.get());
+    auto* assign = dynamic_cast<AssignmentNode*>(block->statements[2].get());
+    ASSERT_NE(assign, nullptr);
+
+    auto* top = dynamic_cast<BinaryExprNode*>(assign->value.get());
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(top->op, TokenType::SHIFT_LEFT);
+    auto* right = dynamic_cast<BinaryExprNode*>(top->right.get());
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(right->op, TokenType::PLUS);
+}
+
+TEST_F(ParserTest, ParsesModulo) {
+    auto program = parse("void main() { byte a; byte x; x = a % 8; }");
+    auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
+    auto* block = dynamic_cast<BlockNode*>(func->body.get());
+    auto* assign = dynamic_cast<AssignmentNode*>(block->statements[2].get());
+    ASSERT_NE(assign, nullptr);
+    auto* top = dynamic_cast<BinaryExprNode*>(assign->value.get());
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(top->op, TokenType::MODULO);
+}
+
+// Unary minus on a literal folds at parse time (two's complement)
+TEST_F(ParserTest, UnaryMinusLiteralFolds) {
+    auto program = parse("void main() { byte x; x = -5; }");
+    auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
+    auto* block = dynamic_cast<BlockNode*>(func->body.get());
+    auto* assign = dynamic_cast<AssignmentNode*>(block->statements[1].get());
+    ASSERT_NE(assign, nullptr);
+    auto* num = dynamic_cast<NumberExprNode*>(assign->value.get());
+    ASSERT_NE(num, nullptr);
+    EXPECT_EQ(num->value, 251); // -5 wraps to 251
+}
+
+TEST_F(ParserTest, UnaryMinusVariable) {
+    auto program = parse("void main() { byte a; byte x; x = -a; }");
+    auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
+    auto* block = dynamic_cast<BlockNode*>(func->body.get());
+    auto* assign = dynamic_cast<AssignmentNode*>(block->statements[2].get());
+    ASSERT_NE(assign, nullptr);
+    auto* unary = dynamic_cast<UnaryExprNode*>(assign->value.get());
+    ASSERT_NE(unary, nullptr);
+    EXPECT_EQ(unary->op, TokenType::MINUS);
+}
+
+// const byte name[] = {...} parses into a data table (sprite machinery)
+TEST_F(ParserTest, ParsesConstTable) {
+    auto program = parse("const byte tbl[] = { 1, 2, 3 }; void main() { }");
+    ASSERT_GE(program->functions.size(), 2u);
+    auto* table = dynamic_cast<SpriteDefNode*>(program->functions[0].get());
+    ASSERT_NE(table, nullptr);
+    EXPECT_EQ(table->name, "tbl");
+    ASSERT_EQ(table->data.size(), 3u);
+    EXPECT_EQ(table->data[0], 1);
+    EXPECT_EQ(table->data[2], 3);
+}
+
+TEST_F(ParserTest, ConstTableSizeMismatchErrors) {
+    bool rejected = false;
+    try {
+        parse("const byte tbl[5] = { 1, 2, 3 }; void main() { }");
+        rejected = errorHandler.hasErrors();
+    } catch (const std::exception&) {
+        rejected = true; // error handler configured to throw
+    }
+    EXPECT_TRUE(rejected);
+}
+
+// for-loop increment accepts i++
+TEST_F(ParserTest, ForLoopPlusPlusIncrement) {
+    auto program = parse("void main() { byte i; for (i = 0; i < 10; i++) { } }");
+    EXPECT_FALSE(errorHandler.hasErrors());
+    auto* func = dynamic_cast<FunctionNode*>(program->functions[0].get());
+    auto* block = dynamic_cast<BlockNode*>(func->body.get());
+    auto* for_node = dynamic_cast<ForNode*>(block->statements[1].get());
+    ASSERT_NE(for_node, nullptr);
+    ASSERT_NE(for_node->increment, nullptr);
+}

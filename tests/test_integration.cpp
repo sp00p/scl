@@ -232,3 +232,207 @@ TEST(IntegrationTest, MultipleVariables) {
     }
     EXPECT_GE(ldCount, 4); // At least 4 loads for a=1, b=2, c=3, d=4
 }
+
+// ============================================================
+// Behavioral tests: compile, execute on the emulator core, and
+// assert on results written to globals (allocated from 0x800 in
+// declaration order).
+// ============================================================
+
+static uint8_t globalAt(Chip8& emu, int index) {
+    return emu.getMemory()[0x800 + index];
+}
+
+static void compileAndRun(HeadlessEmulator& emu, const std::string& source, int max_cycles = 30000) {
+    auto bytecode = compileSource(source);
+    ASSERT_FALSE(bytecode.empty());
+    loadBytecode(emu, bytecode);
+    emu.runUntilHalt(max_cycles);
+}
+
+// Arithmetic through runtime register paths (variables defeat const folding)
+TEST(BehaviorTest, ArithmeticOperators) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2; global byte g3;"
+        "global byte g4; global byte g5; global byte g6;"
+        "void main() {"
+        "  byte a; byte b;"
+        "  a = 23; b = 7;"
+        "  g0 = a % b;"      // 23 % 7 = 2   (runtime loop)
+        "  g1 = a % 8;"      // 23 % 8 = 7   (AND mask)
+        "  g2 = a * 10;"     // 230          (shift-add)
+        "  a = 45;"
+        "  g3 = a / b;"      // 45 / 7 = 6   (runtime loop)
+        "  g4 = a / 8;"      // 45 / 8 = 5   (shifts)
+        "  a = 3;"
+        "  g5 = a << 4;"     // 48           (unrolled)
+        "  b = 2;"
+        "  g6 = a << b;"     // 12           (runtime loop)
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 2);
+    EXPECT_EQ(globalAt(emu, 1), 7);
+    EXPECT_EQ(globalAt(emu, 2), 230);
+    EXPECT_EQ(globalAt(emu, 3), 6);
+    EXPECT_EQ(globalAt(emu, 4), 5);
+    EXPECT_EQ(globalAt(emu, 5), 48);
+    EXPECT_EQ(globalAt(emu, 6), 12);
+}
+
+TEST(BehaviorTest, UnaryMinusAndShiftRight) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2;"
+        "void main() {"
+        "  byte a;"
+        "  a = 23;"
+        "  g0 = -a;"         // 256 - 23 = 233
+        "  g1 = -5;"         // literal fold: 251
+        "  a = 200;"
+        "  g2 = a >> 3;"     // 25
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 233);
+    EXPECT_EQ(globalAt(emu, 1), 251);
+    EXPECT_EQ(globalAt(emu, 2), 25);
+}
+
+TEST(BehaviorTest, OperatorPrecedence) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2;"
+        "void main() {"
+        "  byte a; byte b; byte c;"
+        "  a = 2; b = 3; c = 4;"
+        "  g0 = a + b * c;"      // 14, not 20
+        "  g1 = (a + b) * c;"    // 20
+        "  g2 = a << 1 + 2;"     // 2 << 3 = 16, not 8+2
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 14);
+    EXPECT_EQ(globalAt(emu, 1), 20);
+    EXPECT_EQ(globalAt(emu, 2), 16);
+}
+
+// Every comparison operator, both outcomes, through the fused-branch path
+TEST(BehaviorTest, ComparisonBranches) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2; global byte g3;"
+        "global byte g4; global byte g5; global byte g6; global byte g7;"
+        "void main() {"
+        "  byte a; byte b;"
+        "  a = 3; b = 5;"
+        "  if (a < b)  { g0 = 1; } else { g0 = 2; }"   // 1
+        "  if (a > b)  { g1 = 1; } else { g1 = 2; }"   // 2
+        "  if (a <= 3) { g2 = 1; } else { g2 = 2; }"   // 1
+        "  if (a >= 4) { g3 = 1; } else { g3 = 2; }"   // 2
+        "  if (a == 3) { g4 = 1; } else { g4 = 2; }"   // 1
+        "  if (a != 3) { g5 = 1; } else { g5 = 2; }"   // 2
+        "  if (a == b) { g6 = 1; } else { g6 = 2; }"   // 2
+        "  if (a != b) { g7 = 1; } else { g7 = 2; }"   // 1
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 1);
+    EXPECT_EQ(globalAt(emu, 1), 2);
+    EXPECT_EQ(globalAt(emu, 2), 1);
+    EXPECT_EQ(globalAt(emu, 3), 2);
+    EXPECT_EQ(globalAt(emu, 4), 1);
+    EXPECT_EQ(globalAt(emu, 5), 2);
+    EXPECT_EQ(globalAt(emu, 6), 2);
+    EXPECT_EQ(globalAt(emu, 7), 1);
+}
+
+// Short-circuit && / || and ! through the fused-branch path
+TEST(BehaviorTest, LogicalBranches) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2; global byte g3; global byte g4;"
+        "void main() {"
+        "  byte a; byte b;"
+        "  a = 3; b = 5;"
+        "  if (a < b && b < 10) { g0 = 1; } else { g0 = 2; }"  // 1
+        "  if (a < b && b > 10) { g1 = 1; } else { g1 = 2; }"  // 2
+        "  if (a > b || b == 5) { g2 = 1; } else { g2 = 2; }"  // 1
+        "  if (a > b || b != 5) { g3 = 1; } else { g3 = 2; }"  // 2
+        "  if (!(a == b))       { g4 = 1; } else { g4 = 2; }"  // 1
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 1);
+    EXPECT_EQ(globalAt(emu, 1), 2);
+    EXPECT_EQ(globalAt(emu, 2), 1);
+    EXPECT_EQ(globalAt(emu, 3), 2);
+    EXPECT_EQ(globalAt(emu, 4), 1);
+}
+
+// Loops with fused conditions produce correct iteration counts
+TEST(BehaviorTest, LoopSemantics) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2;"
+        "void main() {"
+        "  byte i; byte sum;"
+        "  sum = 0;"
+        "  for (i = 0; i < 10; i++) { sum = sum + i; }"
+        "  g0 = sum;"                                   // 45
+        "  sum = 0; i = 0;"
+        "  while (i < 5) { sum = sum + 2; i++; }"
+        "  g1 = sum;"                                   // 10
+        "  sum = 0;"
+        "  for (i = 0; i < 10; i++) {"
+        "    if (i == 3) { continue; }"
+        "    if (i == 7) { break; }"
+        "    sum = sum + 1;"
+        "  }"
+        "  g2 = sum;"                                   // iterations 0,1,2,4,5,6 = 6
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 45);
+    EXPECT_EQ(globalAt(emu, 1), 10);
+    EXPECT_EQ(globalAt(emu, 2), 6);
+}
+
+// Const ROM tables: indexed reads with constant and computed indices
+TEST(BehaviorTest, ConstTableReads) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "const byte tbl[] = { 5, 9, 13, 21 };"
+        "global byte g0; global byte g1; global byte g2;"
+        "void main() {"
+        "  byte i;"
+        "  i = 2;"
+        "  g0 = tbl[0];"       // 5
+        "  g1 = tbl[i];"       // 13
+        "  g2 = tbl[i + 1];"   // 21
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 5);
+    EXPECT_EQ(globalAt(emu, 1), 13);
+    EXPECT_EQ(globalAt(emu, 2), 21);
+}
+
+// Conditions still work as values (non-branch context)
+TEST(BehaviorTest, ComparisonAsValue) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1;"
+        "void main() {"
+        "  byte a; byte b;"
+        "  a = 3; b = 5;"
+        "  g0 = (a < b);"      // 1
+        "  g1 = (a == b);"     // 0
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 1);
+    EXPECT_EQ(globalAt(emu, 1), 0);
+}
+
+// Function calls still preserve caller registers with the new codegen
+TEST(BehaviorTest, FunctionCallsPreserveState) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1;"
+        "byte add(byte x, byte y) { return x + y; }"
+        "void main() {"
+        "  byte a; byte b; byte c;"
+        "  a = 10; b = 20;"
+        "  c = add(a, b);"
+        "  g0 = c;"            // 30
+        "  g1 = a + b;"        // 30 - a and b survived the call
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 30);
+    EXPECT_EQ(globalAt(emu, 1), 30);
+}
