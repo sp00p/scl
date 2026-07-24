@@ -206,6 +206,9 @@ std::vector<Token> Lexer::tokenize(const std::string& source) {
                     push(TokenType::PIPE, "|", tok_line, tok_col); i++; col++;
                 }
                 break;
+            case '%':
+                push(TokenType::MODULO, "%", tok_line, tok_col); i++; col++;
+                break;
             case '^':
                 if (i + 1 < source.size() && s[i + 1] == '=') {
                     push(TokenType::XOR_ASSIGN, "^=", tok_line, tok_col); i += 2; col += 2;
@@ -230,6 +233,8 @@ std::vector<Token> Lexer::tokenize(const std::string& source) {
             case '<':
                 if (i + 1 < source.size() && s[i + 1] == '=') {
                     push(TokenType::LESS_EQUAL, "<=", tok_line, tok_col); i += 2; col += 2;
+                } else if (i + 1 < source.size() && s[i + 1] == '<') {
+                    push(TokenType::SHIFT_LEFT, "<<", tok_line, tok_col); i += 2; col += 2;
                 } else {
                     push(TokenType::LESS_THAN, "<", tok_line, tok_col); i++; col++;
                 }
@@ -237,6 +242,8 @@ std::vector<Token> Lexer::tokenize(const std::string& source) {
             case '>':
                 if (i + 1 < source.size() && s[i + 1] == '=') {
                     push(TokenType::GREATER_EQUAL, ">=", tok_line, tok_col); i += 2; col += 2;
+                } else if (i + 1 < source.size() && s[i + 1] == '>') {
+                    push(TokenType::SHIFT_RIGHT, ">>", tok_line, tok_col); i += 2; col += 2;
                 } else {
                     push(TokenType::GREATER_THAN, ">", tok_line, tok_col); i++; col++;
                 }

@@ -41,6 +41,7 @@ private:
     std::unique_ptr<ExprNode> parse_bitwise_or();
     std::unique_ptr<ExprNode> parse_bitwise_xor();
     std::unique_ptr<ExprNode> parse_bitwise_and();
+    std::unique_ptr<ExprNode> parse_shift();
     std::unique_ptr<ExprNode> parse_additive();
     std::unique_ptr<ExprNode> parse_multiplicative();
     std::unique_ptr<ExprNode> parse_comparison();
@@ -57,7 +58,7 @@ private:
     std::unique_ptr<ArrayDeclNode> parse_array_declaration();
     std::unique_ptr<ArrayAssignmentNode> parse_array_assignment();
     std::unique_ptr<ExprNode> parse_primary_expression();
-    std::unique_ptr<ConstDeclNode> parse_const_declaration();
+    std::unique_ptr<ASTNode> parse_const_declaration();
     std::unique_ptr<EnumDeclNode> parse_enum_declaration();
     std::unique_ptr<GlobalVarDeclNode> parse_global_var_declaration();
     std::unique_ptr<EntityDefNode> parse_entity_definition();

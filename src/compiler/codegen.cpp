@@ -23,6 +23,7 @@
             next_array_addr = 0x800;  // Arrays/globals start at 0x800, leaving room for code
             fixups.clear();
             source_map.clear();
+            data_regions.clear();
             current_result_reg = 1;
             
             // Dead code elimination: build call graph and find reachable functions
@@ -240,6 +241,9 @@
                 case TokenType::AMPERSAND: return left & right;
                 case TokenType::PIPE:      return left | right;
                 case TokenType::CARET:     return left ^ right;
+                case TokenType::MODULO:    if (right == 0) return std::nullopt; return (left % right) & 0xFF;
+                case TokenType::SHIFT_LEFT:  return (right >= 8) ? 0 : ((left << right) & 0xFF);
+                case TokenType::SHIFT_RIGHT: return (right >= 8) ? 0 : ((left & 0xFF) >> right);
                 default: return std::nullopt;
             }
         }
@@ -273,38 +277,85 @@
                 return;
             }
 
-            // Optimization 3: Strength-reduce multiply/divide by a constant
-            // power of two into shifts (avoids the runtime multiply/divide
-            // loops and their temp registers entirely)
-            if (right_const && (node.op == TokenType::MULTIPLY || node.op == TokenType::DIVIDE)) {
+            // Optimization 3: Strength-reduce arithmetic with a constant right
+            // operand. All shifts operate in place on dest (x==y makes both
+            // shift-quirk interpretations equivalent); VF is clobbered.
+            if (right_const && (node.op == TokenType::MULTIPLY || node.op == TokenType::DIVIDE ||
+                                node.op == TokenType::MODULO)) {
                 int c = *right_const & 0xFF;
-                if (node.op == TokenType::DIVIDE && c == 0) {
+                if ((node.op == TokenType::DIVIDE || node.op == TokenType::MODULO) && c == 0) {
                     errorHandler.error("Division by zero", node.line, node.column);
                     return;
                 }
                 if (c == 1) {
-                    node.left->accept(*this); // x * 1 == x / 1 == x
-                    return;
-                }
-                if (node.op == TokenType::MULTIPLY && c == 0) {
-                    emit_opcode(0x6000 | (current_result_reg << 8)); // LD dest, 0
-                    return;
-                }
-                if ((c & (c - 1)) == 0) { // power of two
-                    node.left->accept(*this); // evaluate left into dest
-                    int shifts = 0;
-                    while ((1 << shifts) < c) shifts++;
-                    for (int s = 0; s < shifts; s++) {
-                        // Shift dest in place (x==y makes both shift-quirk
-                        // interpretations equivalent); VF gets the shifted-out bit
-                        if (node.op == TokenType::MULTIPLY) {
-                            emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0xE); // SHL
-                        } else {
-                            emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0x6); // SHR
-                        }
+                    if (node.op == TokenType::MODULO) {
+                        node.left->accept(*this);                       // evaluate for side effects
+                        emit_opcode(0x6000 | (current_result_reg << 8)); // x % 1 == 0
+                    } else {
+                        node.left->accept(*this); // x * 1 == x / 1 == x
                     }
                     return;
                 }
+                if (node.op == TokenType::MULTIPLY) {
+                    if (c == 0) {
+                        node.left->accept(*this);                       // evaluate for side effects
+                        emit_opcode(0x6000 | (current_result_reg << 8)); // LD dest, 0
+                        return;
+                    }
+                    // Shift-add decomposition (double-and-add, MSB first).
+                    // x*10 becomes ((x<<1)+x)<<1 style straight-line code:
+                    // far faster than the runtime add-loop and uses one temp.
+                    uint8_t temp = allocate_register();
+                    uint8_t saved = current_result_reg;
+                    current_result_reg = temp;
+                    node.left->accept(*this);
+                    current_result_reg = saved;
+
+                    int top = 7;
+                    while (!((c >> top) & 1)) top--;
+                    emit_opcode(0x8000 | (current_result_reg << 8) | (temp << 4) | 0x0); // LD dest, temp
+                    for (int bit = top - 1; bit >= 0; bit--) {
+                        emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0xE); // SHL dest
+                        if ((c >> bit) & 1) {
+                            emit_opcode(0x8000 | (current_result_reg << 8) | (temp << 4) | 0x4); // ADD dest, temp
+                        }
+                    }
+                    free_register(temp);
+                    return;
+                }
+                if ((c & (c - 1)) == 0) { // power of two divisor
+                    int shifts = 0;
+                    while ((1 << shifts) < c) shifts++;
+                    if (node.op == TokenType::DIVIDE) {
+                        node.left->accept(*this); // evaluate left into dest
+                        for (int i = 0; i < shifts; i++) {
+                            emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0x6); // SHR
+                        }
+                    } else { // MODULO: x % 2^k == x & (2^k - 1)
+                        node.left->accept(*this);
+                        uint8_t temp = allocate_register();
+                        emit_opcode(0x6000 | (temp << 8) | ((c - 1) & 0xFF));                      // LD temp, mask
+                        emit_opcode(0x8000 | (current_result_reg << 8) | (temp << 4) | 0x2);       // AND dest, temp
+                        free_register(temp);
+                    }
+                    return;
+                }
+                // Non-power-of-two divide/modulo falls through to the runtime loop
+            }
+
+            // Optimization 4: Constant shift counts unroll to shift instructions
+            if (right_const && (node.op == TokenType::SHIFT_LEFT || node.op == TokenType::SHIFT_RIGHT)) {
+                int n = *right_const & 0xFF;
+                node.left->accept(*this); // evaluate left into dest
+                if (n >= 8) {
+                    emit_opcode(0x6000 | (current_result_reg << 8)); // all bits shifted out
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        uint8_t op = (node.op == TokenType::SHIFT_LEFT) ? 0xE : 0x6;
+                        emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | op);
+                    }
+                }
+                return;
             }
 
             // Fallback: Evaluate both operands into temporary registers
@@ -432,23 +483,156 @@
             return reg;
         }
 
-        void CodeGenerator::visit(IfNode& node) {
-            // Evaluate condition into a temp register as boolean 0/1
-            uint8_t cond_reg = allocate_register();
+        // Branch fusion: emits a conditional branch without materializing the
+        // condition as a 0/1 value. Evaluates cond and emits placeholder jumps
+        // that are TAKEN when the condition is true (jump_when_true) or false
+        // (otherwise); straight-line execution falls through in the opposite
+        // case. Returns the byte offsets of the placeholder jumps for the
+        // caller to patch to the branch target.
+        std::vector<uint16_t> CodeGenerator::emit_cond_branch(ExprNode* cond, bool jump_when_true) {
+            std::vector<uint16_t> out_fixups;
+
+            // !x inverts the branch sense
+            if (auto* un = dynamic_cast<UnaryExprNode*>(cond)) {
+                if (un->op == TokenType::NOT) {
+                    return emit_cond_branch(un->operand.get(), !jump_when_true);
+                }
+            }
+
+            // Known-constant condition: unconditional jump or nothing.
+            // Makes while(1) loop bodies branch-free.
+            if (auto cval = try_get_constant(cond)) {
+                bool truth = (*cval != 0);
+                if (truth == jump_when_true) {
+                    out_fixups.push_back(static_cast<uint16_t>(output.size()));
+                    emit_jump(0); // placeholder
+                }
+                return out_fixups;
+            }
+
+            // Short-circuit && / || as jump chains
+            if (auto* log = dynamic_cast<LogicalExprNode*>(cond)) {
+                if (log->op == TokenType::AND_AND) {
+                    if (!jump_when_true) {
+                        // (a && b) false: jump if a false, else jump if b false
+                        auto f1 = emit_cond_branch(log->left.get(), false);
+                        auto f2 = emit_cond_branch(log->right.get(), false);
+                        f1.insert(f1.end(), f2.begin(), f2.end());
+                        return f1;
+                    }
+                    // (a && b) true: if a false skip past the b test
+                    auto skip = emit_cond_branch(log->left.get(), false);
+                    auto taken = emit_cond_branch(log->right.get(), true);
+                    for (uint16_t at : skip) patch_jump_at(at, static_cast<uint16_t>(output.size()));
+                    return taken;
+                } else { // OR_OR
+                    if (jump_when_true) {
+                        auto f1 = emit_cond_branch(log->left.get(), true);
+                        auto f2 = emit_cond_branch(log->right.get(), true);
+                        f1.insert(f1.end(), f2.begin(), f2.end());
+                        return f1;
+                    }
+                    // (a || b) false: if a true skip past the b test
+                    auto skip = emit_cond_branch(log->left.get(), true);
+                    auto taken = emit_cond_branch(log->right.get(), false);
+                    for (uint16_t at : skip) patch_jump_at(at, static_cast<uint16_t>(output.size()));
+                    return taken;
+                }
+            }
+
+            if (auto* cmp = dynamic_cast<ConditionNode*>(cond)) {
+                // We always emit skip-if-TRUE followed by the placeholder jump,
+                // so a taken jump means the effective comparison was FALSE.
+                // For jump_when_true, test the inverted comparison instead.
+                TokenType op = cmp->op;
+                if (jump_when_true) {
+                    switch (op) {
+                        case TokenType::EQUALS:        op = TokenType::NOT_EQUALS; break;
+                        case TokenType::NOT_EQUALS:    op = TokenType::EQUALS; break;
+                        case TokenType::LESS_THAN:     op = TokenType::GREATER_EQUAL; break;
+                        case TokenType::GREATER_EQUAL: op = TokenType::LESS_THAN; break;
+                        case TokenType::GREATER_THAN:  op = TokenType::LESS_EQUAL; break;
+                        case TokenType::LESS_EQUAL:    op = TokenType::GREATER_THAN; break;
+                        default: break;
+                    }
+                }
+
+                if (op == TokenType::EQUALS || op == TokenType::NOT_EQUALS) {
+                    auto rc = try_get_constant(cmp->right.get());
+                    bool l_alloc = false, r_alloc = false;
+                    uint8_t l = get_comparison_operand(cmp->left.get(), l_alloc);
+                    if (rc) {
+                        // SE/SNE Vx, kk immediate forms
+                        emit_opcode((op == TokenType::EQUALS ? 0x3000 : 0x4000) | (l << 8) | (*rc & 0xFF));
+                    } else {
+                        uint8_t r = get_comparison_operand(cmp->right.get(), r_alloc);
+                        emit_opcode((op == TokenType::EQUALS ? 0x5000 : 0x9000) | (l << 8) | (r << 4));
+                        if (r_alloc) free_register(r);
+                    }
+                    if (l_alloc) free_register(l);
+                } else {
+                    // Ordered comparison via SUB borrow flag:
+                    //   l <  r:  VF == 0 after (l - r)
+                    //   l >= r:  VF == 1 after (l - r)
+                    //   l >  r:  VF == 0 after (r - l)
+                    //   l <= r:  VF == 1 after (r - l)
+                    // Evaluation stays left-then-right for side-effect order.
+                    bool swap = (op == TokenType::GREATER_THAN || op == TokenType::LESS_EQUAL);
+                    int want_vf = (op == TokenType::GREATER_EQUAL || op == TokenType::LESS_EQUAL) ? 1 : 0;
+
+                    bool a_alloc = false;
+                    uint8_t temp;
+                    if (!swap) {
+                        // temp = left; SUB temp, right
+                        temp = allocate_register();
+                        uint8_t saved = current_result_reg;
+                        current_result_reg = temp;
+                        cmp->left->accept(*this);
+                        current_result_reg = saved;
+
+                        uint8_t r = get_comparison_operand(cmp->right.get(), a_alloc);
+                        emit_opcode(0x8000 | (temp << 8) | (r << 4) | 0x5); // SUB temp, right
+                        if (a_alloc) free_register(r);
+                    } else {
+                        // temp = right; SUB temp, left
+                        uint8_t l = get_comparison_operand(cmp->left.get(), a_alloc);
+                        temp = allocate_register();
+                        uint8_t saved = current_result_reg;
+                        current_result_reg = temp;
+                        cmp->right->accept(*this);
+                        current_result_reg = saved;
+
+                        emit_opcode(0x8000 | (temp << 8) | (l << 4) | 0x5); // SUB temp, left
+                        if (a_alloc) free_register(l);
+                    }
+                    free_register(temp);
+                    emit_opcode(0x3000 | (0xF << 8) | (want_vf & 0xFF)); // SE VF, want -> skip when true
+                }
+
+                out_fixups.push_back(static_cast<uint16_t>(output.size()));
+                emit_jump(0); // placeholder, taken when comparison is false
+                return out_fixups;
+            }
+
+            // Generic truthiness: evaluate the expression, branch on != 0
+            uint8_t temp = allocate_register();
             uint8_t saved = current_result_reg;
-            current_result_reg = cond_reg;
-            node.condition->accept(*this);
+            current_result_reg = temp;
+            cond->accept(*this);
             current_result_reg = saved;
-
-            // If cond != 0, skip the jump to else
-            emit_opcode(0x4000 | (cond_reg << 8) | 0x00); // SNE Vx, 0
-
-            uint16_t jump_to_else_at = output.size();
+            // jump_when_false: SNE temp,0 skips the jump when temp != 0 (true)
+            // jump_when_true:  SE temp,0 skips the jump when temp == 0 (false)
+            emit_opcode((jump_when_true ? 0x3000 : 0x4000) | (temp << 8) | 0x00);
+            free_register(temp);
+            out_fixups.push_back(static_cast<uint16_t>(output.size()));
             emit_jump(0); // placeholder
+            return out_fixups;
+        }
 
-            // The condition value is dead after the branch above - free its
-            // register now so the branch bodies can reuse it
-            free_register(cond_reg);
+        void CodeGenerator::visit(IfNode& node) {
+            // Branch fusion: jump directly to else/end when the condition is
+            // false; no boolean value is materialized
+            auto else_fixups = emit_cond_branch(node.condition.get(), false);
 
             // then branch
             node.then_branch->accept(*this);
@@ -459,8 +643,10 @@
                 emit_jump(0); // placeholder to jump over else
             }
 
-            // patch jump_to_else to current location (start of else)
-            patch_jump_at(jump_to_else_at, static_cast<uint16_t>(output.size()));
+            // false-branches land here (start of else, or end)
+            for (uint16_t at : else_fixups) {
+                patch_jump_at(at, static_cast<uint16_t>(output.size()));
+            }
 
             // else branch (if any)
             if (node.else_branch) {
@@ -475,20 +661,9 @@
             // Push loop context for break/continue
             loop_stack.push_back({loop_start, {}, {}, false});
 
-            // Evaluate condition into a temp register as boolean 0/1
-            uint8_t cond_reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = cond_reg;
-            node.condition->accept(*this);
-            current_result_reg = saved;
-
-            // If cond != 0, skip the jump to end (continue loop)
-            emit_opcode(0x4000 | (cond_reg << 8) | 0x00); // SNE Vx, 0 => skip next if cond != 0 (true)
-            uint16_t jump_to_end_at = output.size();
-            emit_jump(0); // placeholder - jump to loop end if cond == 0 (false)
-
-            // Condition value is dead after the branch - free it for the body
-            free_register(cond_reg);
+            // Branch fusion: jump to loop end when the condition is false.
+            // For while(1) this emits nothing at all.
+            auto end_fixups = emit_cond_branch(node.condition.get(), false);
 
             // body
             node.body->accept(*this);
@@ -498,7 +673,9 @@
 
             // patch end target
             uint16_t loop_end = static_cast<uint16_t>(output.size());
-            patch_jump_at(jump_to_end_at, loop_end);
+            for (uint16_t at : end_fixups) {
+                patch_jump_at(at, loop_end);
+            }
 
             // Patch all break statements
             for (uint16_t break_addr : loop_stack.back().break_fixups) {
@@ -515,20 +692,8 @@
 
             uint16_t loop_start = static_cast<uint16_t>(output.size());
 
-            // Evaluate condition into a temp register
-            uint8_t cond_reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = cond_reg;
-            node.condition->accept(*this);
-            current_result_reg = saved;
-
-            // If cond != 0, skip the jump to end (continue loop)
-            emit_opcode(0x4000 | (cond_reg << 8) | 0x00); // SNE Vx, 0 => skip next if cond != 0 (true)
-            uint16_t jump_to_end_at = output.size();
-            emit_jump(0); // placeholder - jump to loop end if cond == 0 (false)
-
-            // Condition value is dead after the branch - free it for the body
-            free_register(cond_reg);
+            // Branch fusion: jump to loop end when the condition is false
+            auto end_fixups = emit_cond_branch(node.condition.get(), false);
 
             // For continue in for-loops, we need to jump to the increment, not the condition
             // We use fixups because we don't know the increment address until after the body
@@ -555,7 +720,9 @@
 
             // patch end target
             uint16_t loop_end = static_cast<uint16_t>(output.size());
-            patch_jump_at(jump_to_end_at, loop_end);
+            for (uint16_t at : end_fixups) {
+                patch_jump_at(at, loop_end);
+            }
 
             // Patch all break statements
             for (uint16_t break_addr : loop_stack.back().break_fixups) {
@@ -723,6 +890,11 @@
         }
 
         void CodeGenerator::visit(SpriteDefNode& node) {
+            // Jump over the data so a sprite/table declared inside a function
+            // body is never executed as code
+            uint16_t skip_at = static_cast<uint16_t>(output.size());
+            emit_jump(0); // placeholder
+
             // Record sprite address and height
             sprites[node.name] = static_cast<uint16_t>(output.size());
             sprite_heights[node.name] = node.height;
@@ -736,6 +908,12 @@
             if (output.size() % 2 != 0) {
                 emit_byte(0x00);
             }
+
+            // Record the data extent so the peephole pass never treats these
+            // bytes as instructions (a data pair like 70 00 looks like ADD V0,0)
+            data_regions.push_back({sprites[node.name], static_cast<uint16_t>(output.size())});
+
+            patch_jump_at(skip_at, static_cast<uint16_t>(output.size()));
         }
 
         void CodeGenerator::visit(BreakNode& /*node*/) {
@@ -782,6 +960,13 @@
                 emit_opcode(0x3000 | (current_result_reg << 8) | 0x00); // SE Vx, 0 -> skip if zero
                 emit_opcode(0x6000 | (temp_reg << 8) | 0x00);            // LD temp, 0 (was non-zero)
                 emit_opcode(0x8000 | (current_result_reg << 8) | (temp_reg << 4) | 0x0); // LD Vx, temp
+                free_register(temp_reg);
+            } else if (node.op == TokenType::MINUS) {
+                // Unary minus: dest = 0 - operand (8-bit two's complement wrap)
+                uint8_t temp_reg = allocate_register();
+                emit_opcode(0x8000 | (temp_reg << 8) | (current_result_reg << 4) | 0x0); // LD temp, dest
+                emit_opcode(0x6000 | (current_result_reg << 8) | 0x00);                  // LD dest, 0
+                emit_opcode(0x8000 | (current_result_reg << 8) | (temp_reg << 4) | 0x5); // SUB dest, temp
                 free_register(temp_reg);
             }
         }
@@ -879,6 +1064,30 @@
             // arr[i] or arr[i][j] - read array element into current_result_reg
             auto it = arrays.find(node.array_name);
             if (it == arrays.end()) {
+                // Const ROM table (const byte name[] = {...}) - read-only
+                // indexed load from program memory
+                auto rom_it = sprites.find(node.array_name);
+                if (rom_it != sprites.end()) {
+                    if (node.indices.size() != 1) {
+                        errorHandler.error("Const table '" + node.array_name + "' is one-dimensional",
+                                           node.line, node.column);
+                        return;
+                    }
+                    // Evaluate index into V0
+                    uint8_t saved = current_result_reg;
+                    current_result_reg = 0;
+                    node.indices[0]->accept(*this);
+                    current_result_reg = saved;
+
+                    uint16_t base_addr = 0x200 + rom_it->second;
+                    emit_opcode(0xA000 | (base_addr & 0x0FFF)); // LD I, base
+                    emit_opcode(0xF01E);                        // ADD I, V0
+                    emit_opcode(0xF065);                        // LD V0, [I]
+                    if (current_result_reg != 0) {
+                        emit_opcode(0x8000 | (current_result_reg << 8)); // LD Vx, V0
+                    }
+                    return;
+                }
                 errorHandler.error("Undefined array: " + node.array_name, node.line, node.column);
                 return;
             }
@@ -952,6 +1161,12 @@
             // arr[i] = x; or arr[i][j] = x; - write value to array element
             auto it = arrays.find(node.array_name);
             if (it == arrays.end()) {
+                if (sprites.count(node.array_name)) {
+                    errorHandler.error("Cannot assign to '" + node.array_name +
+                                       "': const tables and sprites are read-only",
+                                       node.line, node.column);
+                    return;
+                }
                 errorHandler.error("Undefined array: " + node.array_name, node.line, node.column);
                 return;
             }
@@ -1409,6 +1624,41 @@
 
                 case TokenType::CARET: // Bitwise XOR
                     emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x3); // XOR Vx, Vy
+                    break;
+
+                case TokenType::MODULO:
+                {
+                    // dest = dest % right via repeated subtraction.
+                    // Note: right == 0 at runtime hangs (same as divide).
+                    uint16_t loop_start = static_cast<uint16_t>(output.size());
+                    emit_opcode(0x8000 | (0xF << 8) | (dest_reg << 4) | 0x0);  // LD VF, dest
+                    emit_opcode(0x8000 | (0xF << 8) | (right_reg << 4) | 0x5); // SUB VF, right (VF=1 if dest>=right)
+                    emit_opcode(0x4000 | (0xF << 8) | 0x00);                   // SNE VF, 0 -> skip if dest>=right
+                    uint16_t jump_to_end_at = static_cast<uint16_t>(output.size());
+                    emit_jump(0); // exit when dest < right
+                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x5); // SUB dest, right
+                    emit_jump(loop_start);
+                    patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
+                }
+                    break;
+
+                case TokenType::SHIFT_LEFT:
+                case TokenType::SHIFT_RIGHT:
+                {
+                    // Variable shift count: loop shifting dest once per count
+                    uint8_t counter_reg = allocate_register();
+                    emit_opcode(0x8000 | (counter_reg << 8) | (right_reg << 4) | 0x0); // LD counter, right
+                    uint16_t loop_start = static_cast<uint16_t>(output.size());
+                    emit_opcode(0x4000 | (counter_reg << 8) | 0x00); // SNE counter, 0 -> skip if counter != 0
+                    uint16_t jump_to_end_at = static_cast<uint16_t>(output.size());
+                    emit_jump(0);
+                    uint8_t shift_op = (op == TokenType::SHIFT_LEFT) ? 0xE : 0x6;
+                    emit_opcode(0x8000 | (dest_reg << 8) | (dest_reg << 4) | shift_op); // shift dest in place
+                    emit_opcode(0x7000 | (counter_reg << 8) | 0xFF); // ADD counter, -1
+                    emit_jump(loop_start);
+                    patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
+                    free_register(counter_reg);
+                }
                     break;
 
                 default:
@@ -1971,8 +2221,18 @@
                        hi == 0x9000 || hi == 0xE000;
             };
 
+            auto in_data = [&](size_t off) {
+                for (const auto& [start, end] : data_regions) {
+                    if (off >= start && off < end) return true;
+                }
+                return false;
+            };
+
             // Scan for patterns (instructions are 2 bytes each)
             for (size_t i = 0; i + 3 < output.size(); i += 2) {
+                // Never rewrite sprite/table data bytes
+                if (in_data(i) || in_data(i + 2)) continue;
+
                 uint16_t op1 = (output[i] << 8) | output[i + 1];
                 uint16_t op2 = (output[i + 2] << 8) | output[i + 3];
 
@@ -2030,7 +2290,7 @@
                 size_t i = output.size() - 2;
                 uint16_t op = (output[i] << 8) | output[i + 1];
                 bool follows_skip = (i >= 2) && is_skip((output[i - 2] << 8) | output[i - 1]);
-                if (follows_skip) op = 0; // never remove a skipped instruction
+                if (follows_skip || in_data(i)) op = 0; // never remove skipped instructions or data
                 if ((op & 0xF00F) == 0x8000) {
                     uint8_t x = (op >> 8) & 0xF;
                     uint8_t y = (op >> 4) & 0xF;
@@ -2076,6 +2336,18 @@
                 fixup.address -= static_cast<uint16_t>(offset_adjust[fixup.address]);
             }
 
+            // Update data region extents (keep originals for the LD I scan below)
+            auto original_regions = data_regions;
+            for (auto& [start, end] : data_regions) {
+                start -= static_cast<uint16_t>(offset_adjust[start]);
+                end -= static_cast<uint16_t>(offset_adjust[end]);
+            }
+
+            // Update sprite addresses
+            for (auto& [name, addr] : sprites) {
+                addr -= static_cast<uint16_t>(offset_adjust[addr]);
+            }
+
             // Update source map addresses (mappings use absolute 0x200-based addresses)
             {
                 std::vector<SourceMapping> old_mappings = source_map.getAllMappings();
@@ -2092,6 +2364,15 @@
             
             // Update all jump (1xxx) and call (2xxx) targets that were already patched
             for (size_t i = 0; i + 1 < new_output.size(); i += 2) {
+                // Skip data regions (their extents were adjusted above, so they
+                // are in new_output coordinates); data bytes must not be
+                // misread as jump instructions and rewritten
+                bool in_new_data = false;
+                for (const auto& [start, end] : data_regions) {
+                    if (i >= start && i < end) { in_new_data = true; break; }
+                }
+                if (in_new_data) continue;
+
                 uint16_t op = (new_output[i] << 8) | new_output[i + 1];
                 uint16_t opcode_type = op & 0xF000;
                 
@@ -2106,6 +2387,25 @@
                             size_t adjustment = offset_adjust[old_offset];
                             uint16_t new_target = static_cast<uint16_t>(old_target - adjustment);
                             uint16_t new_op = (opcode_type) | (new_target & 0x0FFF);
+                            new_output[i] = static_cast<uint8_t>((new_op >> 8) & 0xFF);
+                            new_output[i + 1] = static_cast<uint8_t>(new_op & 0xFF);
+                        }
+                    }
+                } else if (opcode_type == 0xA000) {
+                    // LD I, addr referencing sprite/table data must shift too.
+                    // Only adjust targets inside a known data region: other
+                    // Axxx targets (arrays at 0x800+, the caller-save area)
+                    // are fixed memory addresses unaffected by code removal.
+                    uint16_t old_target = op & 0x0FFF;
+                    if (old_target >= 0x200) {
+                        size_t old_offset = old_target - 0x200;
+                        bool is_data = false;
+                        for (const auto& [start, end] : original_regions) {
+                            if (old_offset >= start && old_offset < end) { is_data = true; break; }
+                        }
+                        if (is_data && old_offset < offset_adjust.size()) {
+                            uint16_t new_target = static_cast<uint16_t>(old_target - offset_adjust[old_offset]);
+                            uint16_t new_op = 0xA000 | (new_target & 0x0FFF);
                             new_output[i] = static_cast<uint8_t>((new_op >> 8) & 0xFF);
                             new_output[i + 1] = static_cast<uint8_t>(new_op & 0xFF);
                         }

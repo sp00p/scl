@@ -92,6 +92,7 @@ private:
 
     void emit_comparison_node(uint8_t dest_reg, uint8_t left_Reg, uint8_t right_reg, TokenType op);
     uint8_t get_comparison_operand(ExprNode* expr, bool& allocated);
+    std::vector<uint16_t> emit_cond_branch(ExprNode* cond, bool jump_when_true);
     void process_binary_operation(uint8_t dest_reg, uint8_t left_reg, uint8_t right_reg, TokenType op);
 
     std::optional<int> try_get_constant(ExprNode* expr);
@@ -128,6 +129,7 @@ private:
 
     uint16_t next_array_addr = 0x800;
     SourceMap source_map;
+    std::vector<std::pair<uint16_t, uint16_t>> data_regions;
     std::vector<bool> used_registers;
     ErrorHandler& errorHandler;
     uint8_t current_result_reg = 1;

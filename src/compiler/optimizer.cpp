@@ -31,6 +31,14 @@ int Optimizer::evaluateConstant(const ExprNode* expr, bool& is_constant) {
                 case TokenType::AMPERSAND: return left_val & right_val;
                 case TokenType::PIPE: return left_val | right_val;
                 case TokenType::CARET: return left_val ^ right_val;
+                case TokenType::MODULO:
+                    if (right_val != 0) return (left_val % right_val) & 0xFF;
+                    is_constant = false;
+                    return 0;
+                case TokenType::SHIFT_LEFT:
+                    return (right_val >= 8) ? 0 : ((left_val << right_val) & 0xFF);
+                case TokenType::SHIFT_RIGHT:
+                    return (right_val >= 8) ? 0 : ((left_val & 0xFF) >> right_val);
                 case TokenType::EQUALS: return left_val == right_val ? 1 : 0;
                 case TokenType::NOT_EQUALS: return left_val != right_val ? 1 : 0;
                 case TokenType::LESS_THAN: return left_val < right_val ? 1 : 0;

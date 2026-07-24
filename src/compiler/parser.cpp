@@ -629,6 +629,21 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
         unary->operand = parse_primary_expression();
         return unary;
     }
+    if (check(TokenType::MINUS)) {
+        advance();
+        auto operand = parse_primary_expression();
+        // Fold -literal at parse time (two's complement, 8-bit wrap)
+        if (auto* num = dynamic_cast<NumberExprNode*>(operand.get())) {
+            num->value = (256 - (num->value & 0xFF)) & 0xFF;
+            return operand;
+        }
+        auto unary = std::make_unique<UnaryExprNode>();
+        unary->line = line;
+        unary->column = col;
+        unary->op = TokenType::MINUS;
+        unary->operand = std::move(operand);
+        return unary;
+    }
     if (check(TokenType::IDENTIFIER)) {
         std::string name = current().value;
         advance();
@@ -697,7 +712,7 @@ std::unique_ptr<ExprNode> Parser::parse_primary_expression() {
 }
 
 // Expression grammar with C-style operator precedence (lowest to highest):
-//   |  ^  &  + -  * /  primary
+//   |  ^  &  << >>  + -  * / %  primary
 std::unique_ptr<ExprNode> Parser::parse_expression() {
     return parse_bitwise_or();
 }
@@ -736,11 +751,22 @@ std::unique_ptr<ExprNode> Parser::parse_bitwise_xor() {
 }
 
 std::unique_ptr<ExprNode> Parser::parse_bitwise_and() {
-    auto left = parse_additive();
+    auto left = parse_shift();
     while (check(TokenType::AMPERSAND)) {
         int line = current().line, col = current().column;
         advance();
-        left = make_binary(std::move(left), TokenType::AMPERSAND, line, col, parse_additive());
+        left = make_binary(std::move(left), TokenType::AMPERSAND, line, col, parse_shift());
+    }
+    return left;
+}
+
+std::unique_ptr<ExprNode> Parser::parse_shift() {
+    auto left = parse_additive();
+    while (check(TokenType::SHIFT_LEFT) || check(TokenType::SHIFT_RIGHT)) {
+        TokenType op = current().type;
+        int line = current().line, col = current().column;
+        advance();
+        left = make_binary(std::move(left), op, line, col, parse_additive());
     }
     return left;
 }
@@ -758,7 +784,7 @@ std::unique_ptr<ExprNode> Parser::parse_additive() {
 
 std::unique_ptr<ExprNode> Parser::parse_multiplicative() {
     auto left = parse_primary_expression();
-    while (check(TokenType::MULTIPLY) || check(TokenType::DIVIDE)) {
+    while (check(TokenType::MULTIPLY) || check(TokenType::DIVIDE) || check(TokenType::MODULO)) {
         TokenType op = current().type;
         int line = current().line, col = current().column;
         advance();
@@ -1240,12 +1266,73 @@ std::unique_ptr<ForNode> Parser::parse_for_statement() {
     return for_node;
 }
 
-std::unique_ptr<ConstDeclNode> Parser::parse_const_declaration() {
-    auto const_decl = std::make_unique<ConstDeclNode>();
-    const_decl->line = current().line;
-    const_decl->column = current().column;
+std::unique_ptr<ASTNode> Parser::parse_const_declaration() {
+    int line = current().line;
+    int col = current().column;
 
-    advance();
+    advance(); // consume 'const'
+
+    // const byte name[] = { ... };  - read-only data table stored in ROM.
+    // Reuses the sprite machinery: a named byte blob emitted into the ROM.
+    if (check(TokenType::BYTE)) {
+        advance();
+        expect(TokenType::IDENTIFIER, "Expected table name after 'const byte'");
+        std::string name = tokens->at(current_token - 1).value;
+
+        expect(TokenType::LBRACKET, "Expected '[' in const table declaration");
+        int declared_size = -1;
+        if (check(TokenType::NUMBER)) {
+            declared_size = std::stoi(current().value);
+            advance();
+        } else if (check(TokenType::HEX_NUMBER)) {
+            declared_size = std::stoi(current().value, nullptr, 16);
+            advance();
+        }
+        expect(TokenType::RBRACKET, "Expected ']' in const table declaration");
+        expect(TokenType::ASSIGN, "Expected '=' after const table name");
+        expect(TokenType::LBRACE, "Expected '{' to begin const table values");
+
+        auto table = std::make_unique<SpriteDefNode>();
+        table->line = line;
+        table->column = col;
+        table->name = name;
+
+        while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+            int value;
+            if (check(TokenType::NUMBER)) {
+                value = std::stoi(current().value);
+            } else if (check(TokenType::HEX_NUMBER)) {
+                value = std::stoi(current().value, nullptr, 16);
+            } else {
+                error("Expected numeric value in const table");
+                return nullptr;
+            }
+            advance();
+            table->data.push_back(static_cast<uint8_t>(value & 0xFF));
+            if (check(TokenType::COMMA)) {
+                advance(); // allow trailing comma
+            } else {
+                break;
+            }
+        }
+        expect(TokenType::RBRACE, "Expected '}' after const table values");
+        expect(TokenType::SEMICOLON, "Expected ';' after const table declaration");
+
+        if (table->data.empty()) {
+            error("Const table must have at least one value");
+        }
+        if (declared_size >= 0 && declared_size != static_cast<int>(table->data.size())) {
+            error("Const table '" + name + "' declares " + std::to_string(declared_size) +
+                  " elements but has " + std::to_string(table->data.size()));
+        }
+        table->height = static_cast<int>(table->data.size());
+        return table;
+    }
+
+    auto const_decl = std::make_unique<ConstDeclNode>();
+    const_decl->line = line;
+    const_decl->column = col;
+
     expect(TokenType::IDENTIFIER, "Expected constant name after 'const'");
     const_decl->name = tokens->at(current_token - 1).value;
 
