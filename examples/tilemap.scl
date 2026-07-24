@@ -1,0 +1,63 @@
+// Tilemap - draws a level layout stored in ROM
+// Demonstrates: const data tables, %, <<, >>, unary minus
+// Controls: W/S (keys 5/8) to switch levels
+
+sprite wall[4]  = { 0xF0, 0xF0, 0xF0, 0xF0 };
+sprite block[4] = { 0x60, 0xF0, 0xF0, 0x60 };
+
+// Two 8x4 levels, one byte per tile: 0 = empty, 1 = wall, 2 = block
+const byte levels[] = {
+    // Level 1
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 0, 2, 0, 0, 2, 0, 1,
+    1, 0, 0, 2, 2, 0, 0, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    // Level 2
+    2, 0, 0, 2, 2, 0, 0, 2,
+    0, 1, 0, 0, 0, 0, 1, 0,
+    0, 1, 0, 0, 0, 0, 1, 0,
+    2, 0, 0, 2, 2, 0, 0, 2
+};
+
+void draw_level(byte level) {
+    byte i;
+    byte tile;
+    byte x;
+    byte y;
+
+    // Each level is 32 tiles; level base = level << 5
+    byte base = level << 5;
+
+    for (i = 0; i < 32; i++) {
+        tile = levels[base + i];
+        if (tile != 0) {
+            // Tile grid position: x = (i % 8) * 8, y = (i / 8) * 5
+            x = (i % 8) << 3;
+            y = (i >> 3) * 5;
+            if (tile == 1) {
+                draw(x, y + 6, 4, wall);
+            } else {
+                draw(x, y + 6, 4, block);
+            }
+        }
+    }
+}
+
+void main() {
+    byte level = 0;
+    byte redraw = 1;
+
+    while (1) {
+        if (key(5)) { level = 0; redraw = 1; }  // W = level 1
+        if (key(8)) { level = 1; redraw = 1; }  // S = level 2
+
+        if (redraw) {
+            clear;
+            drawnum(level + 1, 28, 0);
+            draw_level(level);
+            redraw = 0;
+        }
+
+        wait(16);
+    }
+}

@@ -29,6 +29,10 @@ const MAX = 100;          // Constant
 // Sprites
 sprite ball[3] = { 0xE0, 0xE0, 0xE0 };
 
+// Read-only data tables (stored in ROM)
+const byte levels[] = { 1, 0, 2, 1 };
+byte t = levels[i];       // Indexed read
+
 // Functions
 void foo() { }            // No return value
 byte bar(byte a) { return a + 1; }
@@ -153,10 +157,16 @@ void main() {
 | `-` | Subtraction | `x - y` |
 | `*` | Multiplication | `x * y` |
 | `/` | Integer Division | `x / y` |
+| `%` | Modulo (remainder) | `x % 8` |
+| `-` (unary) | Negate (two's complement) | `-x` |
 | `++` | Increment | `x++` |
 | `--` | Decrement | `x--` |
 
 Note: All arithmetic wraps at 8 bits (0-255). Division is integer division.
+Multiplication, division, and modulo by powers of two compile to fast
+shifts/masks; multiplication by any constant uses shift-add sequences.
+Dividing or taking modulo by a runtime value of zero hangs the program
+(constant zero is a compile error).
 
 ### Compound Assignment
 | Operator | Description | Equivalent |
@@ -175,6 +185,8 @@ Note: All arithmetic wraps at 8 bits (0-255). Division is integer division.
 | `&` | AND | `x & 0x0F` |
 | `\|` | OR | `x \| 0x80` |
 | `^` | XOR | `x ^ y` |
+| `<<` | Shift left | `x << 3` |
+| `>>` | Shift right | `x >> 1` |
 
 ### Comparison
 | Operator | Description |
@@ -197,14 +209,15 @@ Note: All arithmetic wraps at 8 bits (0-255). Division is integer division.
 
 Operators follow C-style precedence, highest first:
 
-1. `!`, function calls, array indexing, `( )`
-2. `*` `/`
+1. `!`, unary `-`, function calls, array indexing, `( )`
+2. `*` `/` `%`
 3. `+` `-`
-4. `&`
-5. `^`
-6. `\|`
-7. `==` `!=` `<` `>` `<=` `>=`
-8. `&&` `\|\|`
+4. `<<` `>>`
+5. `&`
+6. `^`
+7. `\|`
+8. `==` `!=` `<` `>` `<=` `>=`
+9. `&&` `\|\|`
 
 Use parentheses to group subexpressions:
 
@@ -212,9 +225,6 @@ Use parentheses to group subexpressions:
 byte x = (i & 7) * 8 + 2;     // mask, then multiply, then add
 if ((a < b && c) || done) { } // parens work in conditions too
 ```
-
-Multiplication and division by powers of two compile to fast shift
-instructions; other multiplies/divides use small runtime loops.
 
 ## Control Flow
 
@@ -328,6 +338,33 @@ void main() {
     byte speed = MAX_SPEED;
 }
 ```
+
+### Const Data Tables
+
+Read-only byte tables stored directly in ROM - no RAM or initialization
+code needed. Ideal for level layouts, animation sequences, and lookup tables:
+
+```c
+const byte level[] = {
+    1, 1, 1, 1,
+    1, 0, 0, 1,
+    1, 1, 1, 1
+};
+
+const byte sine[8] = { 0, 3, 5, 6, 6, 5, 3, 0 };  // size checked if given
+
+void main() {
+    byte i = 5;
+    byte tile = level[i];        // Indexed read
+    byte s = sine[i % 8];        // Any expression as index
+}
+```
+
+Tables are one-dimensional and read-only (`level[0] = 5;` is a compile
+error). Declare them at the top level before use. There are no runtime
+bounds checks - an out-of-range index reads adjacent ROM bytes.
+
+See `examples/tilemap.scl` for a complete level-rendering example.
 
 ### Enums
 ```c
@@ -721,6 +758,7 @@ See the `examples/` folder for complete, runnable games:
 - **pong.scl** - Single-player Pong with paddle physics
 - **snake.scl** - Snake game with food and scoring
 - **breakout.scl** - Brick-breaking game with collision
+- **tilemap.scl** - Level rendering from const ROM data tables
 
 To run an example:
 ```bash

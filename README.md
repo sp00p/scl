@@ -127,6 +127,7 @@ The `examples/` folder contains ready-to-run SCL programs:
 - **pong.scl** — Single-player Pong with functions
 - **snake.scl** — Snake game with arrays and collision
 - **breakout.scl** — Brick-breaking game
+- **tilemap.scl** — Level rendering from const ROM data tables
 
 Compile and run:
 ```bash
