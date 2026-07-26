@@ -436,3 +436,56 @@ TEST(BehaviorTest, FunctionCallsPreserveState) {
     EXPECT_EQ(globalAt(emu, 0), 30);
     EXPECT_EQ(globalAt(emu, 1), 30);
 }
+
+// Return-in-VE: fast path (VE free in caller) and slow path (VE live)
+TEST(BehaviorTest, ReturnValueUnderRegisterPressure) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2;"
+        "byte add(byte x, byte y) { return x + y; }"
+        "void main() {"
+        // 13 locals: V1..VC plus VE - forces the VE-live slow path
+        "  byte a; byte b; byte c; byte d; byte e; byte f; byte g;"
+        "  byte h; byte i; byte j; byte k; byte l; byte m;"
+        "  a=1; b=2; c=3; d=4; e=5; f=6; g=7; h=8; i=9; j=10; k=11; l=12; m=13;"
+        "  g0 = add(20, 30);"   // 50 - return survives the full-restore path
+        "  g1 = m;"             // 13 - the VE-resident local survived the call
+        "  g2 = a;"             // 1  - low registers restored
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 50);
+    EXPECT_EQ(globalAt(emu, 1), 13);
+    EXPECT_EQ(globalAt(emu, 2), 1);
+}
+
+// Transitive clobber: mid() itself uses few registers but calls deep(),
+// which uses many. The caller of mid() must save everything deep() touches.
+TEST(BehaviorTest, TransitiveRegisterClobber) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1;"
+        "byte deep(byte x) {"
+        "  byte a; byte b; byte c; byte d; byte e; byte f; byte g;"
+        "  a=1; b=2; c=3; d=4; e=5; f=6; g=7;"
+        "  return x + a + b + c + d + e + f + g;"               // x + 28
+        "}"
+        "byte mid(byte x) { return deep(x); }"
+        "void main() {"
+        "  byte p; byte q; byte r; byte s; byte t; byte u;"
+        "  p=10; q=20; r=30; s=40; t=50; u=60;"
+        "  g0 = mid(2);"                                        // 30
+        "  g1 = p + q + r + s + t + u;"                         // 210 - all intact
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 30);
+    EXPECT_EQ(globalAt(emu, 1), 210);
+}
+
+// Nested/recursive-style call chains still return correctly
+TEST(BehaviorTest, ChainedCallReturns) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0;"
+        "byte inc(byte x) { return x + 1; }"
+        "byte twice_inc(byte x) { return inc(inc(x)); }"
+        "void main() { g0 = twice_inc(5); }");                  // 7
+    EXPECT_EQ(globalAt(emu, 0), 7);
+}

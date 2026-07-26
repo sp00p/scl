@@ -26,6 +26,9 @@ public:
     void compile(const std::string& source_file, const std::string& output_file);
     void setDebugMode(bool enable) { debug_mode = enable; }
     bool isDebugMode() const { return debug_mode; }
+    void setOptimize(bool enable) { optimize = enable; }
+    void setStats(bool enable) { show_stats = enable; }
+    void setListing(bool enable) { emit_listing = enable; }
 
 private:
     Lexer lexer;
@@ -33,6 +36,9 @@ private:
     std::unique_ptr<CodeGenerator> codeGen;
     ErrorHandler errorHandler;
     bool debug_mode;
+    bool optimize = true;
+    bool show_stats = false;
+    bool emit_listing = false;
 };
 
 }

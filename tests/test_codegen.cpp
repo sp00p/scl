@@ -553,3 +553,29 @@ TEST_F(CodeGenTest, PeepholeDoesNotRewriteData) {
     }
     EXPECT_TRUE(data_found);
 }
+
+// --- Peephole patterns 5/6: dead branches around empty bodies ---
+
+// An if with an empty body compiles away entirely (skip + jump-to-next pair)
+TEST_F(CodeGenTest, EmptyIfBodyIsFree) {
+    auto with_if = compile("void main() { byte a; a = 1; if (a == 1) { } }");
+    auto without  = compile("void main() { byte a; a = 1; }");
+    ASSERT_FALSE(with_if.empty());
+    EXPECT_EQ(with_if.size(), without.size());
+}
+
+// --- Return-value-in-VE convention ---
+
+// A value-returning call needs no memory round-trip when VE is free:
+// the return lands in VE and is copied to the destination register
+TEST_F(CodeGenTest, ReturnUsesVERegister) {
+    auto rom = compile("byte five() { return 5; } "
+                       "void main() { byte x; x = five(); }");
+    ASSERT_FALSE(rom.empty());
+    // Callee loads the return value into VE: LD VE, 5 (6E05)
+    bool found = false;
+    for (size_t i = 0; i + 1 < rom.size(); i += 2) {
+        if (opcodeAt(rom, i) == 0x6E05) found = true;
+    }
+    EXPECT_TRUE(found);
+}

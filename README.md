@@ -68,7 +68,7 @@ scl run tetris.ch8
 # Debug a ROM (opens debugger window)
 scl debug tetris.ch8
 
-# Compile SCL source to ROM
+# Compile SCL source to ROM (--stats, --listing, -O0 available)
 scl compile game.scl game.ch8
 
 # Disassemble a ROM

@@ -1,6 +1,7 @@
 #include <chip8/compiler/compiler.h>
 #include <chip8/compiler/preprocessor.h>
 #include <chip8/compiler/optimizer.h>
+#include <chip8/disassembler.h>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -71,14 +72,17 @@ void Compiler::compile(const std::string &source_file, const std::string &output
 
         // AST-level optimizations (constant folding, dead code elimination)
         Optimizer optimizer;
-        optimizer.optimize(*ast);
+        if (optimize) {
+            optimizer.optimize(*ast);
 
-        if (debug_mode) {
-            std::cout << "Optimization complete: " << optimizer.getConstantsFolded()
-                      << " constants folded, " << optimizer.getDeadCodeRemoved()
-                      << " dead statements removed" << std::endl;
+            if (debug_mode) {
+                std::cout << "Optimization complete: " << optimizer.getConstantsFolded()
+                          << " constants folded, " << optimizer.getDeadCodeRemoved()
+                          << " dead statements removed" << std::endl;
+            }
         }
 
+        codeGen->setPeepholeEnabled(optimize);
         std::vector<uint8_t> output = codeGen->generate(*ast);
 
         if (errorHandler.hasErrors()) {
@@ -135,6 +139,64 @@ void Compiler::compile(const std::string &source_file, const std::string &output
         if (debug_mode) {
             std::cout << "Compilation successful: wrote " << output.size() << " bytes to "
                       << output_file << " (source map: " << map_file << ")" << std::endl;
+        }
+
+        if (show_stats) {
+            constexpr size_t ROM_CAPACITY = 0xDFF - 0x200 + 1; // 3072 bytes (0x200-0xDFF)
+            size_t data_bytes = codeGen->getDataBytes();
+            std::cout << "--- Compilation stats ---\n";
+            std::cout << "ROM size:     " << output.size() << " / " << ROM_CAPACITY
+                      << " bytes (" << (output.size() * 100 / ROM_CAPACITY) << "%)\n";
+            std::cout << "  code:       " << (output.size() - data_bytes) << " bytes\n";
+            std::cout << "  data:       " << data_bytes << " bytes (sprites/tables)\n";
+            if (optimize) {
+                std::cout << "peephole:     " << codeGen->getPeepholeSaved() << " bytes removed\n";
+                std::cout << "const folds:  " << optimizer.getConstantsFolded() << "\n";
+            }
+            std::cout << "register peaks per function (of 13 usable):\n";
+            for (const auto& [name, peak] : codeGen->getFunctionRegisterPeaks()) {
+                int shown = peak;
+                if (shown == 0xE) shown = 13;      // VE counts as the 13th
+                else if (shown > 12) shown = 12;
+                std::cout << "  " << name << ": " << shown << "\n";
+            }
+        }
+
+        if (emit_listing) {
+            // Annotated disassembly interleaved with source lines
+            std::string lst_file = output_file + ".lst";
+            std::ofstream lst(lst_file);
+            if (lst) {
+                // First mapping address per line-start for annotation
+                std::map<uint16_t, int> addr_to_line;
+                for (const auto& m : map.getAllMappings()) {
+                    if (!addr_to_line.count(m.address)) addr_to_line[m.address] = m.line;
+                }
+                map.setSource(source);
+
+                Disassembler disasm;
+                auto instructions = disasm.disassemble(output);
+                lst << "; Annotated listing for " << source_file << "\n\n";
+                for (const auto& instr : instructions) {
+                    auto line_it = addr_to_line.find(instr.address);
+                    if (line_it != addr_to_line.end()) {
+                        std::string text = map.getSourceLine(line_it->second);
+                        // Trim leading whitespace
+                        size_t start = text.find_first_not_of(" \t");
+                        if (start != std::string::npos) text = text.substr(start);
+                        lst << "\n; line " << line_it->second << ": " << text << "\n";
+                    }
+                    lst << std::hex << std::uppercase << std::setfill('0');
+                    lst << std::setw(3) << instr.address << ":  "
+                        << std::setw(4) << instr.opcode << "  " << std::dec;
+                    lst << instr.mnemonic;
+                    if (!instr.comment.empty()) lst << "  " << instr.comment;
+                    lst << "\n";
+                }
+                if (debug_mode) {
+                    std::cout << "Listing written to " << lst_file << std::endl;
+                }
+            }
         }
 
     }

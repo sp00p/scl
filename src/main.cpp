@@ -21,15 +21,27 @@ void print_usage(const char* program_name) {
     std::cerr << "Usage:\n"
               << "  " << program_name << " run <rom_file> [--schip]    - Run a CHIP-8 ROM\n"
               << "  " << program_name << " debug <rom_file> [--schip]  - Run with debug UI\n"
-              << "  " << program_name << " compile <source> <output>   - Compile SCL to CHIP-8\n"
+              << "  " << program_name << " compile <src> <out> [opts]  - Compile SCL to CHIP-8\n"
+              << "        options: --debug --stats --listing -O0\n"
               << "  " << program_name << " disasm <rom_file> [output]  - Disassemble a CHIP-8 ROM\n"
               << "  " << program_name << " decompile <rom_file>        - Decompile ROM to pseudo-code\n";
 }
 
-int run_compiler(const std::string& source_file, const std::string& output_file, bool debug) {
+struct CompileOptions {
+    bool debug = false;
+    bool optimize = true;
+    bool stats = false;
+    bool listing = false;
+};
+
+int run_compiler(const std::string& source_file, const std::string& output_file,
+                 const CompileOptions& opts) {
     try {
         chip8::compiler::Compiler compiler;
-        compiler.setDebugMode(debug);
+        compiler.setDebugMode(opts.debug);
+        compiler.setOptimize(opts.optimize);
+        compiler.setStats(opts.stats);
+        compiler.setListing(opts.listing);
         compiler.compile(source_file, output_file);
         return 0;
     } catch (const std::exception& e) {
@@ -220,8 +232,20 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return 1;
         }
-        bool debug = (argc > 4 && std::string(argv[4]) == "--debug");
-        return run_compiler(argv[2], argv[3], debug);
+        CompileOptions opts;
+        for (int i = 4; i < argc; i++) {
+            std::string arg = argv[i];
+            if (arg == "--debug")        opts.debug = true;
+            else if (arg == "-O0")       opts.optimize = false;
+            else if (arg == "--stats")   opts.stats = true;
+            else if (arg == "--listing") opts.listing = true;
+            else {
+                std::cerr << "Unknown option: " << arg << "\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+        }
+        return run_compiler(argv[2], argv[3], opts);
     } else if (command == "disasm") {
         if (argc < 3) {
             std::cerr << "Error: ROM file required for 'disasm' command\n";

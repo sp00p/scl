@@ -34,6 +34,14 @@ public:
     CodeGenerator(ErrorHandler& errorHandler);
     std::vector<uint8_t> generate(ProgramNode& program);
     const SourceMap& getSourceMap() const { return source_map; }
+    void setPeepholeEnabled(bool enable) { peephole_enabled = enable; }
+    size_t getPeepholeSaved() const { return peephole_saved; }
+    const std::map<std::string, uint8_t>& getFunctionRegisterPeaks() const { return function_max_regs; }
+    size_t getDataBytes() const {
+        size_t n = 0;
+        for (const auto& r : data_regions) n += r.second - r.first;
+        return n;
+    }
 
     void visit(ProgramNode& node) override;
     void visit(FunctionNode& node) override;
@@ -92,6 +100,7 @@ private:
 
     void emit_comparison_node(uint8_t dest_reg, uint8_t left_Reg, uint8_t right_reg, TokenType op);
     uint8_t get_comparison_operand(ExprNode* expr, bool& allocated);
+    bool expr_reads_register(ExprNode* expr, uint8_t reg);
     std::vector<uint16_t> emit_cond_branch(ExprNode* cond, bool jump_when_true);
     void process_binary_operation(uint8_t dest_reg, uint8_t left_reg, uint8_t right_reg, TokenType op);
 
@@ -150,6 +159,12 @@ private:
     std::vector<LoopContext> loop_stack;
 
     uint16_t call_depth = 0;
+    uint8_t peak_register = 0; // highest register touched in current function
+    int current_stmt_line = 0; // source location of the statement being compiled
+    int current_stmt_col = 0;
+    bool peephole_enabled = true;
+    size_t peephole_saved = 0;
+
     static constexpr uint16_t CALLER_SAVE_BASE = 0xF50;
 
     std::map<std::string, std::set<std::string>> call_graph;

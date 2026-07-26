@@ -718,10 +718,39 @@ void main() {
 - **14 local variables** per function (V1-VE registers)
 - **No floating point** - integers only (0-255)
 - **No strings** - use sprites for text
-- **~3.5KB program size** - code area is 0x200-0xDFF (3584 bytes)
+- **~3KB program size** - code area is 0x200-0xDFF (3072 bytes)
 - **~1.8KB** for arrays/globals - starting at 0x800, up to 0xF50
 - **16-level call stack** - CHIP-8 hardware limit
 - **~10 nested function calls** - runtime stack space
+
+## Compiler Options
+
+```bash
+scl compile game.scl game.ch8 [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--stats` | Print ROM usage, code/data split, peephole savings, and per-function register peaks |
+| `--listing` | Write `game.ch8.lst`, an annotated disassembly interleaved with source lines |
+| `-O0` | Disable the AST optimizer and peephole pass (for debugging codegen issues) |
+| `--debug` | Verbose compilation trace |
+
+Example `--stats` output:
+
+```
+--- Compilation stats ---
+ROM size:     508 / 3072 bytes (16%)
+  code:       502 bytes
+  data:       6 bytes (sprites/tables)
+peephole:     12 bytes removed
+const folds:  19
+register peaks per function (of 13 usable):
+  main: 12
+```
+
+The register peaks are the numbers to watch: a function at 13 is one
+expression away from an out-of-registers error - move state to globals.
 
 ## Compiler Warnings
 

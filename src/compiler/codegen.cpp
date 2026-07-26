@@ -41,7 +41,7 @@
                 program.accept(*this);
                 
                 // Peephole optimization pass (before resolving fixups)
-                peephole_optimize();
+                peephole_saved = peephole_enabled ? peephole_optimize() : 0;
 
                 // Resolve fixups (JP/CALL targets)
                 for (const auto& fixup : fixups) {
@@ -115,17 +115,24 @@
 
             // Allocate registers for parameters
             // Parameters are passed in V1, V2, V3, ... Vn
+            peak_register = 0;
             for (size_t i = 0; i < node.params.size() && i < 14; i++) {
                 uint8_t reg = static_cast<uint8_t>(i + 1); // V1, V2, etc.
                 used_registers[reg] = true;
+                if (reg > peak_register) peak_register = reg;
                 variables.emplace(node.params[i].name, Variable(node.params[i].name, reg));
             }
 
             // Visit the function body
             node.body->accept(*this);
-            
-            // Record max register used by this function (for smarter caller-save)
-            function_max_regs[node.name] = getMaxLocalVariableReg();
+
+            // Record the PEAK register touched by this function (for smart
+            // caller-save). End-of-body state would miss temp registers that
+            // spiked mid-body and were freed. Value-returning functions also
+            // write VE (the return register).
+            uint8_t clobber_max = peak_register;
+            if (node.returns_value && clobber_max < 0xE) clobber_max = 0xE;
+            function_max_regs[node.name] = clobber_max;
 
             // Add a return instruction at the end of the function
             emit_opcode(0x00EE); // RET
@@ -153,6 +160,8 @@
                 if (stmt->line > 0) {
                     source_map.addMapping(static_cast<uint16_t>(0x200 + output.size()),
                                           stmt->line, stmt->column);
+                    current_stmt_line = stmt->line;
+                    current_stmt_col = stmt->column;
                 }
 
                 stmt->accept(*this);
@@ -358,7 +367,27 @@
                 return;
             }
 
-            // Fallback: Evaluate both operands into temporary registers
+            // Fallback: use the destination register as the left accumulator
+            // when the right operand cannot observe it. This keeps chained
+            // expressions like a+b+c+d at ONE temp total instead of two temps
+            // per nesting level. Not applicable when dest is V0 (global reads
+            // inside the right operand clobber V0).
+            if (current_result_reg != 0 && !expr_reads_register(node.right.get(), current_result_reg)) {
+                node.left->accept(*this); // left value lands in dest
+
+                uint8_t right_reg = allocate_register();
+                uint8_t saved = current_result_reg;
+                current_result_reg = right_reg;
+                node.right->accept(*this);
+                current_result_reg = saved;
+
+                process_binary_operation(current_result_reg, current_result_reg, right_reg, node.op);
+                free_register(right_reg);
+                return;
+            }
+
+            // Right operand references the destination (e.g. x = y + x) or
+            // dest is V0: evaluate both operands into temporaries
             uint8_t left_reg = allocate_register();
             uint8_t right_reg = allocate_register();
 
@@ -458,6 +487,50 @@
             if (right_allocated) free_register(right_reg);
         }
 
+        // Conservatively reports whether evaluating expr could read the value
+        // currently in `reg` (i.e. references a local variable stored there).
+        // Used to decide if the destination register can serve as the left
+        // accumulator while the right operand is evaluated.
+        bool CodeGenerator::expr_reads_register(ExprNode* expr, uint8_t reg) {
+            if (!expr) return false;
+            if (auto* var = dynamic_cast<VariableExprNode*>(expr)) {
+                if (constants.count(var->name) || arrays.count(var->name)) return false;
+                auto it = variables.find(var->name);
+                return it != variables.end() && it->second.reg == reg;
+            }
+            if (auto* bin = dynamic_cast<BinaryExprNode*>(expr))
+                return expr_reads_register(bin->left.get(), reg) || expr_reads_register(bin->right.get(), reg);
+            if (auto* cond = dynamic_cast<ConditionNode*>(expr))
+                return expr_reads_register(cond->left.get(), reg) || expr_reads_register(cond->right.get(), reg);
+            if (auto* log = dynamic_cast<LogicalExprNode*>(expr))
+                return expr_reads_register(log->left.get(), reg) || expr_reads_register(log->right.get(), reg);
+            if (auto* un = dynamic_cast<UnaryExprNode*>(expr))
+                return expr_reads_register(un->operand.get(), reg);
+            if (auto* key = dynamic_cast<KeyExprNode*>(expr))
+                return expr_reads_register(key->key_num.get(), reg);
+            if (auto* rnd = dynamic_cast<RandExprNode*>(expr))
+                return expr_reads_register(rnd->max_val.get(), reg);
+            if (auto* arr = dynamic_cast<ArrayAccessExprNode*>(expr)) {
+                for (const auto& idx : arr->indices)
+                    if (expr_reads_register(idx.get(), reg)) return true;
+                return false;
+            }
+            if (auto* call = dynamic_cast<FunctionCallExprNode*>(expr)) {
+                for (const auto& arg : call->arguments)
+                    if (expr_reads_register(arg.get(), reg)) return true;
+                return false;
+            }
+            if (auto* ent = dynamic_cast<EntityFieldAccessExpr*>(expr))
+                return expr_reads_register(ent->index.get(), reg);
+            // Leaf nodes (numbers, strings, waitkey, collision, timer) read nothing
+            if (dynamic_cast<NumberExprNode*>(expr) || dynamic_cast<StringExprNode*>(expr) ||
+                dynamic_cast<WaitKeyExprNode*>(expr) || dynamic_cast<CollisionExprNode*>(expr) ||
+                dynamic_cast<TimerExprNode*>(expr)) {
+                return false;
+            }
+            return true; // unknown node type: be conservative
+        }
+
         // Returns a register holding the operand's value. Reuses a local
         // variable's own register when safe (it must not alias the result
         // register, which comparison emitters use as scratch); otherwise
@@ -541,6 +614,13 @@
             }
 
             if (auto* cmp = dynamic_cast<ConditionNode*>(cond)) {
+                // No destination register exists in branch context; neutralize
+                // current_result_reg so the operand-alias guard in
+                // get_comparison_operand never forces a spurious copy
+                // (variables never live in V0)
+                uint8_t saved_crr = current_result_reg;
+                current_result_reg = 0;
+
                 // We always emit skip-if-TRUE followed by the placeholder jump,
                 // so a taken jump means the effective comparison was FALSE.
                 // For jump_when_true, test the inverted comparison instead.
@@ -609,6 +689,7 @@
                     emit_opcode(0x3000 | (0xF << 8) | (want_vf & 0xFF)); // SE VF, want -> skip when true
                 }
 
+                current_result_reg = saved_crr;
                 out_fixups.push_back(static_cast<uint16_t>(output.size()));
                 emit_jump(0); // placeholder, taken when comparison is false
                 return out_fixups;
@@ -918,7 +999,7 @@
 
         void CodeGenerator::visit(BreakNode& /*node*/) {
             if (loop_stack.empty()) {
-                errorHandler.error("break outside of loop", 0, 0);
+                errorHandler.error("break outside of loop", current_stmt_line, current_stmt_col);
                 return;
             }
             // Emit jump placeholder, will be patched when loop ends
@@ -929,7 +1010,7 @@
 
         void CodeGenerator::visit(ContinueNode& /*node*/) {
             if (loop_stack.empty()) {
-                errorHandler.error("continue outside of loop", 0, 0);
+                errorHandler.error("continue outside of loop", current_stmt_line, current_stmt_col);
                 return;
             }
             if (loop_stack.back().is_for_loop) {
@@ -1246,10 +1327,13 @@
         }
 
         void CodeGenerator::visit(ReturnNode& node) {
-            // If there's a return value, evaluate it into V0
+            // Return value convention: VE. The caller's register restore
+            // (LD V0..Vsave_max, [I]) only reaches VE when the caller has 13+
+            // live registers, so in the common case the return value survives
+            // the restore with no memory round-trip.
             if (node.value) {
                 uint8_t saved = current_result_reg;
-                current_result_reg = 0; // Return value in V0
+                current_result_reg = 0xE; // Return value in VE
                 node.value->accept(*this);
                 current_result_reg = saved;
             }
@@ -1268,6 +1352,13 @@
             if (callee_it != function_max_regs.end()) {
                 save_max = std::min(caller_max, callee_it->second);
             }
+
+            // This function transitively clobbers whatever the callee does:
+            // registers above our own save range are not restored here, so
+            // they must count toward OUR recorded clobber set. Unknown
+            // (forward-declared) callees are treated as clobbering everything.
+            uint8_t callee_clobber = (callee_it != function_max_regs.end()) ? callee_it->second : 0xE;
+            if (callee_clobber > peak_register) peak_register = callee_clobber;
             
             if (save_max > 0) {
                 emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
@@ -1293,28 +1384,44 @@
             emit_opcode(0x2000); // placeholder CALL
             fixups.push_back({call_at, node.function_name, true});
 
-            // Restore: ADD VD, -17; LD I, CALLER_SAVE_BASE; ADD I, VD
+            // Pop the runtime stack frame
             emit_opcode(0x7DEF);                               // ADD VD, -17 (0xEF = -17 in 8-bit)
 
-            // Save return value (V0) to a temp location before restoring registers
-            // Use address right after the register save area
-            emit_opcode(0xA000 | ((CALLER_SAVE_BASE + 16) & 0x0FFF)); // LD I, temp_addr
-            emit_opcode(0xFD1E);                                      // ADD I, VD
-            emit_opcode(0xF055 | (0 << 8));                           // LD [I], V0
+            // The return value is in VE. When the caller's restore range
+            // (V0..Vsave_max) stops short of VE - the common case - VE simply
+            // survives the restore and no memory round-trip is needed.
+            if (save_max >= 0xE) {
+                // VE is live in the caller and will be overwritten by the
+                // restore: stash the return value in the frame's spare slot
+                emit_opcode(0x8000 | (0 << 8) | (0xE << 4) | 0x0);        // LD V0, VE
+                emit_opcode(0xA000 | ((CALLER_SAVE_BASE + 16) & 0x0FFF)); // LD I, temp_addr
+                emit_opcode(0xFD1E);                                      // ADD I, VD
+                emit_opcode(0xF055 | (0 << 8));                           // LD [I], V0
 
-            // Restore local variable registers (same as saved)
-            if (save_max > 0) {
                 emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
                 emit_opcode(0xFD1E);                               // ADD I, VD
                 emit_opcode(0xF065 | (save_max << 8));             // LD Vsave_max, [I]
-            }
 
-            // Load return value from temp location into current_result_reg
-            emit_opcode(0xA000 | ((CALLER_SAVE_BASE + 16) & 0x0FFF)); // LD I, temp_addr
-            emit_opcode(0xFD1E);                                      // ADD I, VD
-            emit_opcode(0xF065 | (0 << 8));                           // LD V0, [I]
-            if (current_result_reg != 0) {
-                emit_opcode(0x8000 | (current_result_reg << 8) | (0 << 4) | 0x0); // LD Vx, V0
+                // The frame stored VD with its post-increment value, so a
+                // restore range covering VD just re-corrupted the stack
+                // pointer; re-apply the decrement
+                emit_opcode(0x7DEF);                               // ADD VD, -17
+
+                emit_opcode(0xA000 | ((CALLER_SAVE_BASE + 16) & 0x0FFF)); // LD I, temp_addr
+                emit_opcode(0xFD1E);                                      // ADD I, VD
+                emit_opcode(0xF065 | (0 << 8));                           // LD V0, [I]
+                if (current_result_reg != 0) {
+                    emit_opcode(0x8000 | (current_result_reg << 8) | (0 << 4) | 0x0); // LD Vx, V0
+                }
+            } else {
+                if (save_max > 0) {
+                    emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
+                    emit_opcode(0xFD1E);                               // ADD I, VD
+                    emit_opcode(0xF065 | (save_max << 8));             // LD Vsave_max, [I]
+                }
+                if (current_result_reg != 0xE) {
+                    emit_opcode(0x8000 | (current_result_reg << 8) | (0xE << 4) | 0x0); // LD Vx, VE
+                }
             }
         }
 
@@ -1329,6 +1436,13 @@
             if (callee_it != function_max_regs.end()) {
                 save_max = std::min(caller_max, callee_it->second);
             }
+
+            // This function transitively clobbers whatever the callee does:
+            // registers above our own save range are not restored here, so
+            // they must count toward OUR recorded clobber set. Unknown
+            // (forward-declared) callees are treated as clobbering everything.
+            uint8_t callee_clobber = (callee_it != function_max_regs.end()) ? callee_it->second : 0xE;
+            if (callee_clobber > peak_register) peak_register = callee_clobber;
 
             // Save local variable registers using runtime stack offset (VD)
             if (save_max > 0) {
@@ -1362,11 +1476,16 @@
                 emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
                 emit_opcode(0xFD1E);                               // ADD I, VD
                 emit_opcode(0xF065 | (save_max << 8));             // LD Vsave_max, [I]
+                if (save_max >= 0xD) {
+                    // Restore range covered VD (saved post-increment):
+                    // re-apply the decrement to fix the stack pointer
+                    emit_opcode(0x7DEF);                           // ADD VD, -17
+                }
             }
         }
 
         // CHIP-8 memory limits
-        static constexpr size_t MAX_ROM_SIZE = 0xDFF - 0x200 + 1;  // 3584 bytes (0x200-0xDFF)
+        static constexpr size_t MAX_ROM_SIZE = 0xDFF - 0x200 + 1;  // 3072 bytes (0x200-0xDFF)
         static constexpr size_t ROM_WARNING_THRESHOLD = MAX_ROM_SIZE * 90 / 100;  // Warn at 90%
         bool rom_size_warning_issued = false;
 
@@ -1375,7 +1494,7 @@
             
             // Check ROM size limits
             if (output.size() > MAX_ROM_SIZE) {
-                errorHandler.error("ROM size exceeds CHIP-8 limit of 3584 bytes (" + 
+                errorHandler.error("ROM size exceeds CHIP-8 limit of 3072 bytes (" + 
                                    std::to_string(output.size()) + " bytes)", 0, 0);
             } else if (!rom_size_warning_issued && output.size() > ROM_WARNING_THRESHOLD) {
                 errorHandler.warning("ROM size is at " + std::to_string(output.size() * 100 / MAX_ROM_SIZE) + 
@@ -1414,6 +1533,7 @@
                 if (i == 0xD) continue;  // Skip VD - reserved for runtime call stack
                 if (!used_registers[i]) {
                     used_registers[i] = true;
+                    if (i > peak_register) peak_register = i;
                     
                     // Warn when approaching register limit (13 usable: V1-VC, VE)
                     if (used_count >= 11) {  // 11+ of 13 = 85%+ usage
@@ -1431,7 +1551,8 @@
             }
             errorHandler.error("Out of registers (13 available per function; all in use by locals/temporaries). "
                                "Locals: [" + vars_desc + "]. "
-                               "Use 'global' for additional storage or simplify nested expressions.", 0, 0);
+                               "Use 'global' for additional storage or simplify nested expressions.",
+                               current_stmt_line, current_stmt_col);
             return 0; // Default to V0, but ideally this should never happen
         }
 
@@ -1444,7 +1565,7 @@
         uint8_t CodeGenerator::get_variable_register(const std::string& name) {
             auto it = variables.find(name);
             if (it == variables.end()) {
-                errorHandler.error("Undefined variable: " + name, 0, 0);
+                errorHandler.error("Undefined variable: " + name, current_stmt_line, current_stmt_col);
                 return 0; // Default to V0, but should not happen
             }
             return it->second.reg;
@@ -1536,14 +1657,12 @@
                     uint8_t temp_reg = allocate_register();
                     uint8_t counter_reg = allocate_register();
 
+                    // Copy operands out FIRST: dest may alias the left operand
+                    emit_opcode(0x8000 | (counter_reg << 8) | (right_reg << 4) | 0x0); // LD counter, right
+                    emit_opcode(0x8000 | (temp_reg << 8) | (left_reg << 4) | 0x0);     // LD temp, left
+
                     // Initialize result to 0
                     emit_opcode(0x6000 | (dest_reg << 8) | 0x00); // LD Vx, 0
-
-                    // Copy right operand to counter
-                    emit_opcode(0x8000 | (counter_reg << 8) | (right_reg << 4) | 0x0); // LD Vx, Vy
-
-                    // Copy left operand to temp
-                    emit_opcode(0x8000 | (temp_reg << 8) | (left_reg << 4) | 0x0); // LD Vx, Vy
 
                     // Start of loop
                     uint16_t loop_start = static_cast<uint16_t>(output.size());
@@ -2228,6 +2347,12 @@
                 return false;
             };
 
+            // Addresses of still-unresolved fixups (function calls, wait-loop
+            // jumps): these instructions get patched after this pass and must
+            // never be removed
+            std::set<uint16_t> fixup_addrs;
+            for (const auto& f : fixups) fixup_addrs.insert(f.address);
+
             // Scan for patterns (instructions are 2 bytes each)
             for (size_t i = 0; i + 3 < output.size(); i += 2) {
                 // Never rewrite sprite/table data bytes
@@ -2282,6 +2407,28 @@
                         bytes_saved += 2;
                         continue;
                     }
+                }
+
+                // Pattern 5: JP to the very next instruction - no-op.
+                // (Not when it follows a skip: the skip needs something to
+                // skip. Not when a fixup will patch it later.)
+                if ((op1 & 0xF000) == 0x1000 && (op1 & 0x0FFF) == 0x200 + i + 2 &&
+                    !op1_follows_skip && !fixup_addrs.count(static_cast<uint16_t>(i))) {
+                    remove[i] = remove[i + 1] = true;
+                    bytes_saved += 2;
+                    continue;
+                }
+
+                // Pattern 6: conditional skip over a JP to the next
+                // instruction - both paths land on the same instruction and
+                // skips have no side effects, so the whole pair is dead
+                if (is_skip(op1) && (op2 & 0xF000) == 0x1000 &&
+                    (op2 & 0x0FFF) == 0x200 + i + 4 &&
+                    !op1_follows_skip && !fixup_addrs.count(static_cast<uint16_t>(i + 2))) {
+                    remove[i] = remove[i + 1] = true;
+                    remove[i + 2] = remove[i + 3] = true;
+                    bytes_saved += 4;
+                    continue;
                 }
             }
             
