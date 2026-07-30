@@ -408,18 +408,21 @@ TEST_F(WarningTest, WarnsOnUnreachableCode) {
     EXPECT_TRUE(found_unreachable_warning);
 }
 
-TEST_F(WarningTest, ErrorOnTooManyVariables) {
-    // Try to use more than 13 variables (V1-VC, VE - V0, VD, VF reserved)
-    compile(R"(
+TEST_F(WarningTest, ManyVariablesCompileViaSpilling) {
+    // More locals than the 13 physical registers: the register allocator
+    // spills the excess to memory instead of erroring
+    auto rom = compile(R"(
         void main() {
             byte a; byte b; byte c; byte d; byte e;
             byte f; byte g; byte h; byte i; byte j;
             byte k; byte l; byte m; byte n; byte o;
+            a=1; b=2; c=3; d=4; e=5; f=6; g=7; h=8;
+            i=9; j=10; k=11; l=12; m=13; n=14; o=15;
         }
     )");
-    
-    // Should have generated an error about running out of registers
-    EXPECT_TRUE(errorHandler.hasErrors());
+
+    EXPECT_FALSE(errorHandler.hasErrors());
+    EXPECT_FALSE(rom.empty());
 }
 
 TEST_F(WarningTest, ErrorFormatsWithSourceLine) {
@@ -520,10 +523,10 @@ TEST_F(CodeGenTest, ConstTableEmitsDataAndIndexedRead) {
         if (rom[i] == 0xAA && rom[i+1] == 0xBB && rom[i+2] == 0xCC) data_found = true;
     }
     EXPECT_TRUE(data_found);
-    // Indexed read sequence: ADD I, V0 (F01E) then LD V0, [I] (F065)
+    // Indexed read sequence: ADD I, Vx (Fx1E) then LD V0, [I] (F065)
     bool read_found = false;
     for (size_t i = 0; i + 3 < rom.size(); i += 2) {
-        if (opcodeAt(rom, i) == 0xF01E && opcodeAt(rom, i + 2) == 0xF065) read_found = true;
+        if ((opcodeAt(rom, i) & 0xF0FF) == 0xF01E && opcodeAt(rom, i + 2) == 0xF065) read_found = true;
     }
     EXPECT_TRUE(read_found);
 }
@@ -572,10 +575,12 @@ TEST_F(CodeGenTest, ReturnUsesVERegister) {
     auto rom = compile("byte five() { return 5; } "
                        "void main() { byte x; x = five(); }");
     ASSERT_FALSE(rom.empty());
-    // Callee loads the return value into VE: LD VE, 5 (6E05)
+    // The return value reaches VE either directly (LD VE, 5) or via a move
+    // from the allocator-chosen register (LD VE, Vx)
     bool found = false;
     for (size_t i = 0; i + 1 < rom.size(); i += 2) {
-        if (opcodeAt(rom, i) == 0x6E05) found = true;
+        uint16_t op = opcodeAt(rom, i);
+        if (op == 0x6E05 || (op & 0xFF0F) == 0x8E00) found = true;
     }
     EXPECT_TRUE(found);
 }

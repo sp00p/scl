@@ -8,7 +8,7 @@ CHIP-8 emulator, debugger, and compiler. Write games in a C-like language and ru
 
 **Debugger** — ImGui-based debug window with conditional breakpoints, watch expressions, memory editor, register view, live disassembly, stack inspection, and source mapping.
 
-**Compiler** — The SCL language compiles to CHIP-8 bytecode. Supports functions, arrays, control flow, inline assembly, and generates source maps for debugging.
+**Compiler** — The SCL language compiles to CHIP-8 bytecode through an IR with linear-scan register allocation (no fixed variable limit — values spill to memory under pressure). Supports functions, arrays, const ROM data tables, control flow, inline assembly, and generates source maps for debugging. Output uses only base CHIP-8 opcodes with quirk-neutral idioms, so compiled ROMs run on any standard CHIP-8 emulator.
 
 **Disassembler** — Converts ROM files back to readable assembly with basic code flow analysis.
 

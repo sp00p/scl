@@ -218,19 +218,20 @@ TEST(IntegrationTest, ClearScreen) {
     EXPECT_TRUE(found);
 }
 
-// Test: Multiple variables compile
+// Test: Multiple variables compile. Values stored to variables that are
+// never read may be eliminated as dead stores, so only require that the
+// program compiles and contains at least one load.
 TEST(IntegrationTest, MultipleVariables) {
     const char* source = "void main() { byte a; byte b; byte c; byte d; a = 1; b = 2; c = 3; d = 4; }";
     auto bytecode = compileSource(source);
     ASSERT_FALSE(bytecode.empty());
-    // Should have multiple LD Vx, nn instructions
     int ldCount = 0;
     for (size_t i = 0; i + 1 < bytecode.size(); i += 2) {
         if ((bytecode[i] & 0xF0) == 0x60) {
             ldCount++;
         }
     }
-    EXPECT_GE(ldCount, 4); // At least 4 loads for a=1, b=2, c=3, d=4
+    EXPECT_GE(ldCount, 1);
 }
 
 // ============================================================
@@ -488,4 +489,50 @@ TEST(BehaviorTest, ChainedCallReturns) {
         "byte twice_inc(byte x) { return inc(inc(x)); }"
         "void main() { g0 = twice_inc(5); }");                  // 7
     EXPECT_EQ(globalAt(emu, 0), 7);
+}
+
+// The register allocator's headline feature: more live variables than
+// physical registers, all read back correctly (spilled values included).
+TEST(BehaviorTest, SpilledVariablesComputeCorrectly) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1; global byte g2;"
+        "void main() {"
+        "  byte v1; byte v2; byte v3; byte v4; byte v5;"
+        "  byte v6; byte v7; byte v8; byte v9; byte v10;"
+        "  byte v11; byte v12; byte v13; byte v14; byte v15;"
+        "  byte v16; byte v17; byte v18; byte v19; byte v20;"
+        "  v1=1; v2=2; v3=3; v4=4; v5=5; v6=6; v7=7; v8=8; v9=9; v10=10;"
+        "  v11=11; v12=12; v13=13; v14=14; v15=15; v16=16; v17=17; v18=18; v19=19; v20=20;"
+        // every variable is READ here, so none are dead - all 20 are live at once
+        "  g0 = v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10;"      // 55
+        "  g1 = v11 + v12 + v13 + v14 + v15 + v16 + v17 + v18 + v19 + v20;" // 155
+        "  g2 = v1 + v20;"                                              // 21
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 55);
+    EXPECT_EQ(globalAt(emu, 1), 155);
+    EXPECT_EQ(globalAt(emu, 2), 21);
+}
+
+// Spilled values must survive loops and function calls
+TEST(BehaviorTest, SpillsSurviveLoopsAndCalls) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1;"
+        "byte double_it(byte x) { return x + x; }"
+        "void main() {"
+        "  byte a1; byte a2; byte a3; byte a4; byte a5; byte a6; byte a7;"
+        "  byte a8; byte a9; byte a10; byte a11; byte a12; byte a13; byte a14;"
+        "  byte i; byte sum;"
+        "  a1=1; a2=2; a3=3; a4=4; a5=5; a6=6; a7=7;"
+        "  a8=8; a9=9; a10=10; a11=11; a12=12; a13=13; a14=14;"
+        "  sum = 0;"
+        "  for (i = 0; i < 3; i++) {"
+        "    sum = sum + double_it(a14);"      // 3 * 28 = 84
+        "  }"
+        "  g0 = sum;"
+        "  g1 = a1 + a2 + a13 + a14;"          // 30
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 84);
+    EXPECT_EQ(globalAt(emu, 1), 30);
 }

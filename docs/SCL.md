@@ -125,7 +125,11 @@ Supported escape sequences: `\n` (newline), `\r` (carriage return), `\t` (tab), 
 
 ## Variables
 
-Local variables are stored in CHIP-8's V-registers (V1-VE). You can have up to 14 local variables per function.
+Local variables live in CHIP-8's V-registers, assigned by the compiler's
+register allocator. There is no hard variable limit: when a function keeps
+more than 13 values live at once, the extra ones are automatically spilled
+to memory and reloaded as needed (register access is faster, so heavily
+used values stay in registers).
 
 ```c
 byte x = 10;     // Allocates a register
@@ -137,7 +141,7 @@ x = 20;          // Reassignment
 Variables declared inside a function are local to that function. When calling another function, the caller's registers are automatically saved and restored.
 
 ### Global Variables
-For more than 14 variables, use globals (stored in memory):
+For state shared between functions, use globals (stored in memory):
 
 ```c
 global byte high_score;
@@ -715,7 +719,6 @@ void main() {
 
 ## Limitations
 
-- **14 local variables** per function (V1-VE registers)
 - **No floating point** - integers only (0-255)
 - **No strings** - use sprites for text
 - **~3KB program size** - code area is 0x200-0xDFF (3072 bytes)
@@ -749,15 +752,16 @@ register peaks per function (of 13 usable):
   main: 12
 ```
 
-The register peaks are the numbers to watch: a function at 13 is one
-expression away from an out-of-registers error - move state to globals.
+A function at peak 13 with spills listed is paying memory-access overhead
+for the spilled values; if a hot loop is slow, reduce simultaneously-live
+variables or move rarely-used state to globals.
 
 ## Compiler Warnings
 
 The compiler provides helpful warnings to catch potential issues:
 
 - **ROM size warnings** - Warns at 90% capacity, errors if exceeded
-- **Register pressure** - Warns when using 11+ of 13 available registers
+- **Memory pressure** - Errors when arrays and spill slots reach the runtime stack area
 - **Memory usage** - Warns when arrays approach the runtime stack area
 - **Unreachable code** - Warns about code after `return`, `break`, or `continue`
 

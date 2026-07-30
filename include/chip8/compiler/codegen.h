@@ -3,15 +3,21 @@
  * Copyright (c) 2026 Sean Cornell <secornell@ucsd.edu>
  * MIT License
  *
- * Code generator that traverses the AST and emits CHIP-8 bytecode.
+ * Code generator: lowers the AST to IR over virtual registers, runs
+ * linear-scan register allocation (with memory spilling), and emits
+ * CHIP-8 bytecode. See ir.h for the backend pipeline.
+ *
+ * Portability: only base CHIP-8 opcodes are emitted, using quirk-neutral
+ * idioms (shifts with x==y, I always reloaded before memory ops), so
+ * compiled ROMs run on any standard CHIP-8 emulator.
  */
 
 #pragma once
 
 #include "ast.h"
 #include "error_handler.h"
+#include "ir.h"
 #include "source_map.h"
-#include "symbol_table.h"
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -22,13 +28,6 @@
 namespace chip8 {
 namespace compiler {
 
-struct Variable {
-    std::string name;
-    uint8_t reg;
-
-    Variable(const std::string& n, uint8_t r) : name(n), reg(r) {}
-};
-
 class CodeGenerator : public ASTVisitor {
 public:
     CodeGenerator(ErrorHandler& errorHandler);
@@ -37,6 +36,7 @@ public:
     void setPeepholeEnabled(bool enable) { peephole_enabled = enable; }
     size_t getPeepholeSaved() const { return peephole_saved; }
     const std::map<std::string, uint8_t>& getFunctionRegisterPeaks() const { return function_max_regs; }
+    const std::map<std::string, int>& getFunctionSpills() const { return function_spills; }
     size_t getDataBytes() const {
         size_t n = 0;
         for (const auto& r : data_regions) n += r.second - r.first;
@@ -88,38 +88,63 @@ public:
     void visit(EntityFieldAssignNode& node) override;
 
 private:
+    // --- Emission utilities (final bytecode buffer) ---
     void emit_byte(uint8_t byte);
     void emit_opcode(uint16_t opcode);
-    void emit_jump(uint16_t addr_offset_bytes);
-    void patch_jump_at(uint16_t at_offset_bytes, uint16_t target_offset_bytes);
+    size_t peephole_optimize();
 
-    uint8_t allocate_register();
-    void free_register(uint8_t reg);
-    uint8_t get_variable_register(const std::string& name);
-    uint8_t getMaxLocalVariableReg();
-
-    void emit_comparison_node(uint8_t dest_reg, uint8_t left_Reg, uint8_t right_reg, TokenType op);
-    uint8_t get_comparison_operand(ExprNode* expr, bool& allocated);
-    bool expr_reads_register(ExprNode* expr, uint8_t reg);
-    std::vector<uint16_t> emit_cond_branch(ExprNode* cond, bool jump_when_true);
-    void process_binary_operation(uint8_t dest_reg, uint8_t left_reg, uint8_t right_reg, TokenType op);
-
-    std::optional<int> try_get_constant(ExprNode* expr);
-    std::optional<int> eval_binary_op(int left, int right, TokenType op);
+    // --- Dead code elimination ---
     void build_call_graph(ProgramNode& program);
     void collect_calls_from_node(ASTNode* node, const std::string& current_func);
     void mark_reachable(const std::string& func_name);
-    size_t peephole_optimize();
 
+    // --- AST -> IR building ---
+    VReg build_expr(ExprNode* expr, VReg hint = NO_VREG);
+    VReg build_binary(BinaryExprNode& node, VReg hint);
+    VReg build_condition_value(ConditionNode& node);
+    VReg build_logical_value(LogicalExprNode& node);
+    void build_branch(ExprNode* cond, int target_label, bool jump_when_true);
+    void build_block(BlockNode& block);
+    void build_function_ir(FunctionNode& node);
+    VReg build_index(const std::vector<std::unique_ptr<ExprNode>>& indices,
+                     const std::vector<int>& dims);
+    VReg mult_by_const(VReg src, int c, VReg hint = NO_VREG);
+    VReg build_runtime_binop(VReg acc, VReg right, TokenType op);
+    VReg materialize(VReg v, VReg hint);
+
+    std::optional<int> try_get_constant(ExprNode* expr);
+    std::optional<int> eval_binary_op(int left, int right, TokenType op);
+    bool expr_reads_var(ExprNode* expr, const std::string& name, bool skip_left_spine);
+
+    void collect_sprites(ASTNode* node);
+    void emit_sprite_data(SpriteDefNode& node);
+
+    IRInst& emit_ir(IROp op);
+    VReg fresh() { return F->new_vreg(); }
+
+    // --- Output state ---
     std::vector<uint8_t> output;
-    std::map<std::string, Variable> variables;
-    std::map<std::string, uint16_t> labels;
+    std::map<std::string, uint16_t> labels;   // function name -> byte offset
+    struct Fixup {
+        uint16_t address;
+        std::string label;
+        bool is_call = false;
+    };
+    std::vector<Fixup> fixups;
+    std::vector<std::pair<uint16_t, uint16_t>> data_regions;
+    SourceMap source_map;
+    bool peephole_enabled = true;
+    size_t peephole_saved = 0;
+    bool rom_size_warning_issued = false;
+
+    // --- Symbols ---
     std::map<std::string, std::vector<std::string>> function_params;
     std::map<std::string, bool> function_returns;
-    std::map<std::string, uint8_t> function_max_regs;
-    std::map<std::string, uint16_t> sprites;
+    std::map<std::string, uint8_t> function_max_regs; // highest phys used
+    std::map<std::string, int> function_spills;
+    std::map<std::string, uint16_t> sprites;          // name -> output offset
     std::map<std::string, int> sprite_heights;
-    std::map<std::string, uint16_t> arrays;
+    std::map<std::string, uint16_t> arrays;           // name -> absolute address
     std::map<std::string, int> array_sizes;
     std::map<std::string, std::vector<int>> array_dims;
     std::map<std::string, int> constants;
@@ -137,38 +162,25 @@ private:
     std::map<std::string, EntityInstance> entity_instances;
 
     uint16_t next_array_addr = 0x800;
-    SourceMap source_map;
-    std::vector<std::pair<uint16_t, uint16_t>> data_regions;
-    std::vector<bool> used_registers;
-    ErrorHandler& errorHandler;
-    uint8_t current_result_reg = 1;
-
-    struct Fixup {
-        uint16_t address;
-        std::string label;
-        bool is_call = false;
-    };
-    std::vector<Fixup> fixups;
-
-    struct LoopContext {
-        uint16_t continue_target;
-        std::vector<uint16_t> break_fixups;
-        std::vector<uint16_t> continue_fixups;
-        bool is_for_loop = false;
-    };
-    std::vector<LoopContext> loop_stack;
-
-    uint16_t call_depth = 0;
-    uint8_t peak_register = 0; // highest register touched in current function
-    int current_stmt_line = 0; // source location of the statement being compiled
-    int current_stmt_col = 0;
-    bool peephole_enabled = true;
-    size_t peephole_saved = 0;
-
     static constexpr uint16_t CALLER_SAVE_BASE = 0xF50;
 
     std::map<std::string, std::set<std::string>> call_graph;
     std::set<std::string> reachable_functions;
+
+    // --- Builder state (per function) ---
+    IRFunction* F = nullptr;
+    std::map<std::string, VReg> var_vregs;
+    struct LoopLabels {
+        int continue_label;
+        int break_label;
+    };
+    std::vector<LoopLabels> loop_stack;
+    VReg expr_result = NO_VREG;
+    int current_stmt_line = 0;
+    int current_stmt_col = 0;
+    std::vector<GlobalVarDeclNode*> global_inits; // initializers run at main entry
+
+    ErrorHandler& errorHandler;
 };
 
 }

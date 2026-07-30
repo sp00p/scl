@@ -1,235 +1,63 @@
+/*
+ * SCL - CHIP-8 Emulator, Debugger, and Compiler
+ * Copyright (c) 2026 Sean Cornell <secornell@ucsd.edu>
+ * MIT License
+ *
+ * Code generator: AST -> IR lowering, register allocation, and emission.
+ *
+ * Pipeline (see ir.h):
+ *   1. Declarations pass: constants, enums, entity types, global addresses,
+ *      sprite/table data emitted into a data section after the entry stub.
+ *   2. Per function: lower the AST to IR over virtual registers, run the
+ *      linear-scan allocator (spilling to memory when the 13 physical
+ *      registers run out), then emit bytecode.
+ *   3. Resolve call fixups, then the peephole pass cleans up.
+ *
+ * Only base CHIP-8 opcodes are emitted, using quirk-neutral idioms so the
+ * output runs on any standard CHIP-8 emulator.
+ */
+
 #include <chip8/compiler/codegen.h>
 #include <stdexcept>
+#include <string>
 
+namespace chip8 {
+    namespace compiler {
 
-    namespace chip8::compiler {
-        CodeGenerator::CodeGenerator(ErrorHandler &errorHandler)
+        // CHIP-8 memory limits
+        static constexpr size_t MAX_ROM_SIZE = 0xDFF - 0x200 + 1;  // 3072 bytes (0x200-0xDFF)
+        static constexpr size_t ROM_WARNING_THRESHOLD = MAX_ROM_SIZE * 90 / 100;
+
+        CodeGenerator::CodeGenerator(ErrorHandler& errorHandler)
             : errorHandler(errorHandler) {
-            used_registers.resize(16, false);
-            used_registers[0] = true; // V0 reserved for system operations
-            used_registers[15] = true; // VF reserved for flags
         }
 
-        std::vector<uint8_t> CodeGenerator::generate(ProgramNode &program) {
-            output.clear();
-            variables.clear();
-            labels.clear();
-            function_params.clear();
-            function_returns.clear();
-            sprites.clear();
-            sprite_heights.clear();
-            arrays.clear();
-            array_sizes.clear();
-            next_array_addr = 0x800;  // Arrays/globals start at 0x800, leaving room for code
-            fixups.clear();
-            source_map.clear();
-            data_regions.clear();
-            current_result_reg = 1;
-            
-            // Dead code elimination: build call graph and find reachable functions
-            call_graph.clear();
-            reachable_functions.clear();
-            build_call_graph(program);
-            mark_reachable("main");
-
-            used_registers.assign(16, false);
-            used_registers[0] = true;
-            used_registers[15] = true;
-            call_depth = 0;
-
-            try {
-                program.accept(*this);
-                
-                // Peephole optimization pass (before resolving fixups)
-                peephole_saved = peephole_enabled ? peephole_optimize() : 0;
-
-                // Resolve fixups (JP/CALL targets)
-                for (const auto& fixup : fixups) {
-                    auto it = labels.find(fixup.label);
-                    if (it != labels.end()) {
-                        uint16_t target_offset = it->second;               // byte offset in output
-                        uint16_t target_addr = 0x200 + target_offset;      // absolute address in memory
-                        uint16_t opcode = (fixup.is_call ? 0x2000 : 0x1000) | (target_addr & 0x0FFF);
-                        output[fixup.address]     = static_cast<uint8_t>((opcode >> 8) & 0xFF);
-                        output[fixup.address + 1] = static_cast<uint8_t>(opcode & 0xFF);
-                    } else {
-                        errorHandler.error("Undefined label: " + fixup.label, 0, 0);
-                    }
-                }
-
-                return output;
-            } catch (const std::exception& e) {
-                errorHandler.error(std::string("Code generation failed: ") + e.what(), 0, 0);
-                return {};
-            }
+        void CodeGenerator::emit_byte(uint8_t byte) {
+            output.push_back(byte);
         }
 
-        void CodeGenerator::visit(ProgramNode& node) {
-            // Initialize VD = 0 (runtime call stack offset)
-            emit_opcode(0x6D00); // LD VD, 0
-
-            // Program entry stub: CALL main; JP $ (halt)
-            uint16_t call_main_at = output.size();
-            emit_opcode(0x2000); // placeholder CALL 0x000
-            fixups.push_back({call_main_at, std::string("main"), true});
-
-            // Halt: loop to itself after main returns
-            uint16_t halt_offset = output.size();
-            emit_jump(halt_offset);
-
-            // Process each function in the program (skip unreachable ones for DCE)
-            for (auto& func : node.functions) {
-                // Only emit reachable functions
-                if (auto* fn = dynamic_cast<FunctionNode*>(func.get())) {
-                    if (reachable_functions.count(fn->name) > 0) {
-                        func->accept(*this);
-                    }
-                } else {
-                    // Non-function declarations (sprites, constants, etc.) - always emit
-                    func->accept(*this);
-                }
-            }
+        void CodeGenerator::emit_opcode(uint16_t opcode) {
+            emit_byte(static_cast<uint8_t>((opcode >> 8) & 0xFF));
+            emit_byte(static_cast<uint8_t>(opcode & 0xFF));
         }
 
-        void CodeGenerator::visit(FunctionNode& node) {
-            // Record function address (byte offset) in the labels map
-            labels[node.name] = static_cast<uint16_t>(output.size());
-
-            // Store function signature for call validation
-            std::vector<std::string> param_names;
-            for (const auto& param : node.params) {
-                param_names.push_back(param.name);
-            }
-            function_params[node.name] = param_names;
-            function_returns[node.name] = node.returns_value;
-
-            // Save current variable state (for local scope)
-            auto saved_variables = variables;
-            auto saved_used_registers = used_registers;
-
-            // Reset register allocation for this function (keep V0 and VF reserved)
-            used_registers.assign(16, false);
-            used_registers[0] = true;
-            used_registers[15] = true;
-            variables.clear();
-
-            // Allocate registers for parameters
-            // Parameters are passed in V1, V2, V3, ... Vn
-            peak_register = 0;
-            for (size_t i = 0; i < node.params.size() && i < 14; i++) {
-                uint8_t reg = static_cast<uint8_t>(i + 1); // V1, V2, etc.
-                used_registers[reg] = true;
-                if (reg > peak_register) peak_register = reg;
-                variables.emplace(node.params[i].name, Variable(node.params[i].name, reg));
-            }
-
-            // Visit the function body
-            node.body->accept(*this);
-
-            // Record the PEAK register touched by this function (for smart
-            // caller-save). End-of-body state would miss temp registers that
-            // spiked mid-body and were freed. Value-returning functions also
-            // write VE (the return register).
-            uint8_t clobber_max = peak_register;
-            if (node.returns_value && clobber_max < 0xE) clobber_max = 0xE;
-            function_max_regs[node.name] = clobber_max;
-
-            // Add a return instruction at the end of the function
-            emit_opcode(0x00EE); // RET
-
-            // Restore variable state (for global scope)
-            variables = saved_variables;
-            used_registers = saved_used_registers;
+        IRInst& CodeGenerator::emit_ir(IROp op) {
+            IRInst& inst = F->emit(op);
+            inst.line = current_stmt_line;
+            inst.col = current_stmt_col;
+            return inst;
         }
 
-        void CodeGenerator::visit(BlockNode& node) {
-            bool block_terminated = false;  // Track if we've hit return/break/continue
-            
-            // Process each statement in the block
-            for (size_t i = 0; i < node.statements.size(); i++) {
-                auto& stmt = node.statements[i];
-                
-                // Warn about unreachable code after control flow termination
-                if (block_terminated) {
-                    errorHandler.warning("Unreachable code after return/break/continue",
-                                        stmt->line, stmt->column);
-                    break;  // Don't process unreachable statements
-                }
+        // ------------------------------------------------------------------
+        // Constant helpers (AST level)
+        // ------------------------------------------------------------------
 
-                // Record source mapping: this statement's code starts here
-                if (stmt->line > 0) {
-                    source_map.addMapping(static_cast<uint16_t>(0x200 + output.size()),
-                                          stmt->line, stmt->column);
-                    current_stmt_line = stmt->line;
-                    current_stmt_col = stmt->column;
-                }
-
-                stmt->accept(*this);
-                
-                // Check if this statement terminates control flow
-                if (dynamic_cast<ReturnNode*>(stmt.get()) ||
-                    dynamic_cast<BreakNode*>(stmt.get()) ||
-                    dynamic_cast<ContinueNode*>(stmt.get())) {
-                    block_terminated = true;
-                }
-            }
-        }
-
-        void CodeGenerator::visit(VariableDeclNode& node) {
-            // Skip if variable is already declared
-            if (variables.find(node.name) != variables.end()) {
-                errorHandler.error("Variable '" + node.name + "' already declared", node.line, node.column);
-                return;
-            }
-
-            // Allocate a register for the variable
-            uint8_t reg = allocate_register();
-            if (reg == 0) {
-                errorHandler.error("Failed to allocate register for variable '" + node.name + "'", node.line, node.column);
-                return;
-            }
-
-            // Store variable in the variables map
-            variables.emplace(node.name, Variable(node.name, reg));
-
-            // Handle initializer if present: byte x = 10;
-            if (node.initializer) {
-                uint8_t saved = current_result_reg;
-                current_result_reg = reg;
-                node.initializer->accept(*this);
-                current_result_reg = saved;
-            }
-        }
-
-        void CodeGenerator::visit(AssignmentNode& node) {
-            // Check if this is a global variable (stored in memory)
-            auto global_it = arrays.find(node.name);
-            if (global_it != arrays.end() && array_sizes.count(node.name) && array_sizes[node.name] == 1) {
-                // Global variable - evaluate value into V0 and store to memory
-                uint8_t saved = current_result_reg;
-                current_result_reg = 0;
-                node.value->accept(*this);
-                current_result_reg = saved;
-                
-                emit_opcode(0xA000 | (global_it->second & 0x0FFF)); // LD I, addr
-                emit_opcode(0xF055 | (0 << 8)); // LD [I], V0
-                return;
-            }
-            
-            // Local variable - destination register
-            uint8_t dest_reg = get_variable_register(node.name);
-
-            // Evaluate the expression directly into dest_reg
-            uint8_t saved = current_result_reg;
-            current_result_reg = dest_reg;
-            node.value->accept(*this);
-            current_result_reg = saved;
-        }
-
-        // Helper to try getting a constant value from an expression
         std::optional<int> CodeGenerator::try_get_constant(ExprNode* expr) {
             if (auto* num_expr = dynamic_cast<NumberExprNode*>(expr)) {
                 return num_expr->value;
+            }
+            if (auto* str_expr = dynamic_cast<StringExprNode*>(expr)) {
+                return str_expr->value.empty() ? 0 : static_cast<int>(static_cast<uint8_t>(str_expr->value[0]));
             }
             if (auto* var_expr = dynamic_cast<VariableExprNode*>(expr)) {
                 auto it = constants.find(var_expr->name);
@@ -240,7 +68,6 @@
             return std::nullopt;
         }
 
-        // Compile-time evaluation of binary operations for constant folding
         std::optional<int> CodeGenerator::eval_binary_op(int left, int right, TokenType op) {
             switch (op) {
                 case TokenType::PLUS:      return (left + right) & 0xFF;
@@ -257,375 +84,585 @@
             }
         }
 
-        void CodeGenerator::visit(BinaryExprNode& node) {
-            // Optimization 1: Constant folding - evaluate at compile time if both operands are constants
-            auto left_const = try_get_constant(node.left.get());
-            auto right_const = try_get_constant(node.right.get());
-            
-            if (left_const && right_const) {
-                auto result = eval_binary_op(*left_const, *right_const, node.op);
-                if (result) {
-                    emit_opcode(0x6000 | (current_result_reg << 8) | (*result & 0xFF)); // LD Vx, result
-                    return;
-                }
-            }
-
-            // Optimization 2: Immediate ADD/SUB when right operand is constant
-            if (right_const && (node.op == TokenType::PLUS || node.op == TokenType::MINUS)) {
-                // Evaluate left operand directly into the destination register,
-                // then add the immediate (no temp register needed)
-                node.left->accept(*this);
-
-                if (node.op == TokenType::PLUS) {
-                    // ADD Vx, byte (7xkk)
-                    emit_opcode(0x7000 | (current_result_reg << 8) | (*right_const & 0xFF));
-                } else {
-                    // SUB via ADD with two's complement: ADD Vx, -byte
-                    emit_opcode(0x7000 | (current_result_reg << 8) | ((-*right_const) & 0xFF));
-                }
-                return;
-            }
-
-            // Optimization 3: Strength-reduce arithmetic with a constant right
-            // operand. All shifts operate in place on dest (x==y makes both
-            // shift-quirk interpretations equivalent); VF is clobbered.
-            if (right_const && (node.op == TokenType::MULTIPLY || node.op == TokenType::DIVIDE ||
-                                node.op == TokenType::MODULO)) {
-                int c = *right_const & 0xFF;
-                if ((node.op == TokenType::DIVIDE || node.op == TokenType::MODULO) && c == 0) {
-                    errorHandler.error("Division by zero", node.line, node.column);
-                    return;
-                }
-                if (c == 1) {
-                    if (node.op == TokenType::MODULO) {
-                        node.left->accept(*this);                       // evaluate for side effects
-                        emit_opcode(0x6000 | (current_result_reg << 8)); // x % 1 == 0
-                    } else {
-                        node.left->accept(*this); // x * 1 == x / 1 == x
-                    }
-                    return;
-                }
-                if (node.op == TokenType::MULTIPLY) {
-                    if (c == 0) {
-                        node.left->accept(*this);                       // evaluate for side effects
-                        emit_opcode(0x6000 | (current_result_reg << 8)); // LD dest, 0
-                        return;
-                    }
-                    // Shift-add decomposition (double-and-add, MSB first).
-                    // x*10 becomes ((x<<1)+x)<<1 style straight-line code:
-                    // far faster than the runtime add-loop and uses one temp.
-                    uint8_t temp = allocate_register();
-                    uint8_t saved = current_result_reg;
-                    current_result_reg = temp;
-                    node.left->accept(*this);
-                    current_result_reg = saved;
-
-                    int top = 7;
-                    while (!((c >> top) & 1)) top--;
-                    emit_opcode(0x8000 | (current_result_reg << 8) | (temp << 4) | 0x0); // LD dest, temp
-                    for (int bit = top - 1; bit >= 0; bit--) {
-                        emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0xE); // SHL dest
-                        if ((c >> bit) & 1) {
-                            emit_opcode(0x8000 | (current_result_reg << 8) | (temp << 4) | 0x4); // ADD dest, temp
-                        }
-                    }
-                    free_register(temp);
-                    return;
-                }
-                if ((c & (c - 1)) == 0) { // power of two divisor
-                    int shifts = 0;
-                    while ((1 << shifts) < c) shifts++;
-                    if (node.op == TokenType::DIVIDE) {
-                        node.left->accept(*this); // evaluate left into dest
-                        for (int i = 0; i < shifts; i++) {
-                            emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | 0x6); // SHR
-                        }
-                    } else { // MODULO: x % 2^k == x & (2^k - 1)
-                        node.left->accept(*this);
-                        uint8_t temp = allocate_register();
-                        emit_opcode(0x6000 | (temp << 8) | ((c - 1) & 0xFF));                      // LD temp, mask
-                        emit_opcode(0x8000 | (current_result_reg << 8) | (temp << 4) | 0x2);       // AND dest, temp
-                        free_register(temp);
-                    }
-                    return;
-                }
-                // Non-power-of-two divide/modulo falls through to the runtime loop
-            }
-
-            // Optimization 4: Constant shift counts unroll to shift instructions
-            if (right_const && (node.op == TokenType::SHIFT_LEFT || node.op == TokenType::SHIFT_RIGHT)) {
-                int n = *right_const & 0xFF;
-                node.left->accept(*this); // evaluate left into dest
-                if (n >= 8) {
-                    emit_opcode(0x6000 | (current_result_reg << 8)); // all bits shifted out
-                } else {
-                    for (int i = 0; i < n; i++) {
-                        uint8_t op = (node.op == TokenType::SHIFT_LEFT) ? 0xE : 0x6;
-                        emit_opcode(0x8000 | (current_result_reg << 8) | (current_result_reg << 4) | op);
-                    }
-                }
-                return;
-            }
-
-            // Fallback: use the destination register as the left accumulator
-            // when the right operand cannot observe it. This keeps chained
-            // expressions like a+b+c+d at ONE temp total instead of two temps
-            // per nesting level. Not applicable when dest is V0 (global reads
-            // inside the right operand clobber V0).
-            if (current_result_reg != 0 && !expr_reads_register(node.right.get(), current_result_reg)) {
-                node.left->accept(*this); // left value lands in dest
-
-                uint8_t right_reg = allocate_register();
-                uint8_t saved = current_result_reg;
-                current_result_reg = right_reg;
-                node.right->accept(*this);
-                current_result_reg = saved;
-
-                process_binary_operation(current_result_reg, current_result_reg, right_reg, node.op);
-                free_register(right_reg);
-                return;
-            }
-
-            // Right operand references the destination (e.g. x = y + x) or
-            // dest is V0: evaluate both operands into temporaries
-            uint8_t left_reg = allocate_register();
-            uint8_t right_reg = allocate_register();
-
-            // Evaluate left operand (use visitor for proper global/constant handling)
-            uint8_t saved = current_result_reg;
-            current_result_reg = left_reg;
-            node.left->accept(*this);
-            current_result_reg = saved;
-
-            // Evaluate right operand
-            saved = current_result_reg;
-            current_result_reg = right_reg;
-            node.right->accept(*this);
-            current_result_reg = saved;
-
-            // Compute into current_result_reg
-            process_binary_operation(current_result_reg, left_reg, right_reg, node.op);
-
-            free_register(left_reg);
-            free_register(right_reg);
-        }
-
-        void CodeGenerator::visit(VariableExprNode& node) {
-            // Check if this is a constant first
-            auto const_it = constants.find(node.name);
-            if (const_it != constants.end()) {
-                // Load constant value directly
-                emit_opcode(0x6000 | (current_result_reg << 8) | (const_it->second & 0xFF)); // LD Vx, byte
-                return;
-            }
-            
-            // Check if this is a global variable (stored in memory, size=1)
-            auto global_it = arrays.find(node.name);
-            if (global_it != arrays.end() && array_sizes.count(node.name) && array_sizes[node.name] == 1) {
-                // Global variable - load from memory into V0, then copy to current_result_reg
-                emit_opcode(0xA000 | (global_it->second & 0x0FFF)); // LD I, addr
-                emit_opcode(0xF065 | (0 << 8)); // LD V0, [I]
-                if (current_result_reg != 0) {
-                    emit_opcode(0x8000 | (current_result_reg << 8) | (0 << 4) | 0x0); // LD Vx, V0
-                }
-                return;
-            }
-            
-            // Local variable - load from register
-            uint8_t var_reg = get_variable_register(node.name);
-            emit_opcode(0x8000 | (current_result_reg << 8) | (var_reg << 4) | 0x0); // LD Vx, Vy
-        }
-
-        void CodeGenerator::visit(NumberExprNode& node) {
-            // Load the immediate value into the current_result_reg
-            emit_opcode(0x6000 | (current_result_reg << 8) | (node.value & 0xFF)); // LD Vx, byte
-        }
-
-        void CodeGenerator::visit(StringExprNode& node) {
-            // For string literals, load the ASCII value of the first character
-            // This is useful for character comparisons like: if (c == "A") {...}
-            // For multi-character strings in arrays, they should be handled during initialization
-            if (node.value.empty()) {
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0); // LD Vx, 0
-            } else {
-                uint8_t ascii_val = static_cast<uint8_t>(node.value[0]);
-                emit_opcode(0x6000 | (current_result_reg << 8) | ascii_val); // LD Vx, ASCII
-            }
-        }
-
-        void CodeGenerator::visit(ConditionNode& node) {
-            // EQ/NE against a constant can use the immediate skip forms
-            // (SE/SNE Vx, kk) - no temp register needed for the right side
-            auto right_const = try_get_constant(node.right.get());
-            if (right_const && (node.op == TokenType::EQUALS || node.op == TokenType::NOT_EQUALS)) {
-                bool left_allocated;
-                uint8_t left_reg = get_comparison_operand(node.left.get(), left_allocated);
-
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x00); // LD dest, 0
-                if (node.op == TokenType::EQUALS) {
-                    emit_opcode(0x4000 | (left_reg << 8) | (*right_const & 0xFF)); // SNE left, kk
-                } else {
-                    emit_opcode(0x3000 | (left_reg << 8) | (*right_const & 0xFF)); // SE left, kk
-                }
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x01); // LD dest, 1
-
-                if (left_allocated) free_register(left_reg);
-                return;
-            }
-
-            // Comparison emitters never modify the operand registers, so plain
-            // local variables can be compared in place; only complex operands
-            // need a temporary
-            bool left_allocated, right_allocated;
-            uint8_t left_reg = get_comparison_operand(node.left.get(), left_allocated);
-            uint8_t right_reg = get_comparison_operand(node.right.get(), right_allocated);
-
-            // Write boolean result into current_result_reg (0 or 1)
-            emit_comparison_node(current_result_reg, left_reg, right_reg, node.op);
-
-            if (left_allocated) free_register(left_reg);
-            if (right_allocated) free_register(right_reg);
-        }
-
-        // Conservatively reports whether evaluating expr could read the value
-        // currently in `reg` (i.e. references a local variable stored there).
-        // Used to decide if the destination register can serve as the left
-        // accumulator while the right operand is evaluated.
-        bool CodeGenerator::expr_reads_register(ExprNode* expr, uint8_t reg) {
+        // Does evaluating `expr` read variable `name`? With skip_left_spine,
+        // the leftmost operand chain of binary nodes is excluded: an
+        // accumulator-style evaluation writes the target only after reading
+        // the left spine, so those reads are safe.
+        bool CodeGenerator::expr_reads_var(ExprNode* expr, const std::string& name, bool skip_left_spine) {
             if (!expr) return false;
             if (auto* var = dynamic_cast<VariableExprNode*>(expr)) {
-                if (constants.count(var->name) || arrays.count(var->name)) return false;
-                auto it = variables.find(var->name);
-                return it != variables.end() && it->second.reg == reg;
+                if (constants.count(var->name)) return false;
+                return var->name == name;
             }
-            if (auto* bin = dynamic_cast<BinaryExprNode*>(expr))
-                return expr_reads_register(bin->left.get(), reg) || expr_reads_register(bin->right.get(), reg);
-            if (auto* cond = dynamic_cast<ConditionNode*>(expr))
-                return expr_reads_register(cond->left.get(), reg) || expr_reads_register(cond->right.get(), reg);
-            if (auto* log = dynamic_cast<LogicalExprNode*>(expr))
-                return expr_reads_register(log->left.get(), reg) || expr_reads_register(log->right.get(), reg);
+            if (auto* bin = dynamic_cast<BinaryExprNode*>(expr)) {
+                return expr_reads_var(bin->left.get(), name, skip_left_spine) ||
+                       expr_reads_var(bin->right.get(), name, false);
+            }
+            if (auto* cond = dynamic_cast<ConditionNode*>(expr)) {
+                return expr_reads_var(cond->left.get(), name, false) ||
+                       expr_reads_var(cond->right.get(), name, false);
+            }
+            if (auto* log = dynamic_cast<LogicalExprNode*>(expr)) {
+                return expr_reads_var(log->left.get(), name, false) ||
+                       expr_reads_var(log->right.get(), name, false);
+            }
             if (auto* un = dynamic_cast<UnaryExprNode*>(expr))
-                return expr_reads_register(un->operand.get(), reg);
+                return expr_reads_var(un->operand.get(), name, false);
             if (auto* key = dynamic_cast<KeyExprNode*>(expr))
-                return expr_reads_register(key->key_num.get(), reg);
+                return expr_reads_var(key->key_num.get(), name, false);
             if (auto* rnd = dynamic_cast<RandExprNode*>(expr))
-                return expr_reads_register(rnd->max_val.get(), reg);
+                return expr_reads_var(rnd->max_val.get(), name, false);
             if (auto* arr = dynamic_cast<ArrayAccessExprNode*>(expr)) {
                 for (const auto& idx : arr->indices)
-                    if (expr_reads_register(idx.get(), reg)) return true;
+                    if (expr_reads_var(idx.get(), name, false)) return true;
                 return false;
             }
             if (auto* call = dynamic_cast<FunctionCallExprNode*>(expr)) {
                 for (const auto& arg : call->arguments)
-                    if (expr_reads_register(arg.get(), reg)) return true;
+                    if (expr_reads_var(arg.get(), name, false)) return true;
                 return false;
             }
             if (auto* ent = dynamic_cast<EntityFieldAccessExpr*>(expr))
-                return expr_reads_register(ent->index.get(), reg);
-            // Leaf nodes (numbers, strings, waitkey, collision, timer) read nothing
+                return expr_reads_var(ent->index.get(), name, false);
             if (dynamic_cast<NumberExprNode*>(expr) || dynamic_cast<StringExprNode*>(expr) ||
                 dynamic_cast<WaitKeyExprNode*>(expr) || dynamic_cast<CollisionExprNode*>(expr) ||
                 dynamic_cast<TimerExprNode*>(expr)) {
                 return false;
             }
-            return true; // unknown node type: be conservative
+            return true; // unknown node: be conservative
         }
 
-        // Returns a register holding the operand's value. Reuses a local
-        // variable's own register when safe (it must not alias the result
-        // register, which comparison emitters use as scratch); otherwise
-        // allocates a temporary and sets allocated = true.
-        uint8_t CodeGenerator::get_comparison_operand(ExprNode* expr, bool& allocated) {
-            allocated = false;
-            if (auto* var = dynamic_cast<VariableExprNode*>(expr)) {
-                // Not a named constant and not a memory-backed global
-                if (!constants.count(var->name) && !arrays.count(var->name)) {
-                    auto it = variables.find(var->name);
-                    if (it != variables.end() && it->second.reg != current_result_reg) {
-                        return it->second.reg;
+        // ------------------------------------------------------------------
+        // Expression building
+        // ------------------------------------------------------------------
+
+        // Move v into hint if a hint was given; otherwise return v as-is.
+        VReg CodeGenerator::materialize(VReg v, VReg hint) {
+            if (hint == NO_VREG || v == hint) return v;
+            IRInst& m = emit_ir(IROp::Move);
+            m.dst = hint;
+            m.src1 = v;
+            return hint;
+        }
+
+        // dst = src * c using shift-add decomposition (double-and-add).
+        VReg CodeGenerator::mult_by_const(VReg src, int c, VReg hint) {
+            c &= 0xFF;
+            if (c == 0) {
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = 0;
+                return r;
+            }
+            if (c == 1) return materialize(src, hint);
+
+            VReg acc = (hint != NO_VREG && hint != src) ? hint : fresh();
+            int top = 7;
+            while (!((c >> top) & 1)) top--;
+            { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = src; }
+            for (int bit = top - 1; bit >= 0; bit--) {
+                { IRInst& s = emit_ir(IROp::Shl); s.dst = acc; }
+                if ((c >> bit) & 1) {
+                    IRInst& a = emit_ir(IROp::Add); a.dst = acc; a.src1 = src;
+                }
+            }
+            return acc;
+        }
+
+        // Runtime (register-register) binary operation. acc is owned by the
+        // caller and is mutated in place; returns acc.
+        VReg CodeGenerator::build_runtime_binop(VReg acc, VReg right, TokenType op) {
+            switch (op) {
+                case TokenType::PLUS:  { IRInst& i = emit_ir(IROp::Add); i.dst = acc; i.src1 = right; break; }
+                case TokenType::MINUS: { IRInst& i = emit_ir(IROp::Sub); i.dst = acc; i.src1 = right; break; }
+                case TokenType::AMPERSAND: { IRInst& i = emit_ir(IROp::And); i.dst = acc; i.src1 = right; break; }
+                case TokenType::PIPE:  { IRInst& i = emit_ir(IROp::Or); i.dst = acc; i.src1 = right; break; }
+                case TokenType::CARET: { IRInst& i = emit_ir(IROp::Xor); i.dst = acc; i.src1 = right; break; }
+
+                case TokenType::MULTIPLY: {
+                    // acc = acc * right via repeated addition
+                    VReg mul = fresh();   // running result
+                    VReg counter = fresh();
+                    { IRInst& i = emit_ir(IROp::Const); i.dst = mul; i.imm = 0; }
+                    { IRInst& i = emit_ir(IROp::Move); i.dst = counter; i.src1 = right; }
+                    int loop = F->new_label();
+                    int end = F->new_label();
+                    { IRInst& i = emit_ir(IROp::Label); i.imm = loop; }
+                    { IRInst& i = emit_ir(IROp::BrEqI); i.src1 = counter; i.imm2 = 0; i.imm = end; }
+                    { IRInst& i = emit_ir(IROp::Add); i.dst = mul; i.src1 = acc; }
+                    { IRInst& i = emit_ir(IROp::AddI); i.dst = counter; i.imm = 0xFF; }
+                    { IRInst& i = emit_ir(IROp::Jump); i.imm = loop; }
+                    { IRInst& i = emit_ir(IROp::Label); i.imm = end; }
+                    { IRInst& i = emit_ir(IROp::Move); i.dst = acc; i.src1 = mul; }
+                    break;
+                }
+                case TokenType::DIVIDE:
+                case TokenType::MODULO: {
+                    // Repeated subtraction. Quotient in counter, remainder in acc.
+                    // Note: right == 0 at runtime hangs (constant 0 is a
+                    // compile error upstream).
+                    VReg counter = fresh();
+                    { IRInst& i = emit_ir(IROp::Const); i.dst = counter; i.imm = 0; }
+                    int loop = F->new_label();
+                    int end = F->new_label();
+                    { IRInst& i = emit_ir(IROp::Label); i.imm = loop; }
+                    VReg cmp = fresh();
+                    { IRInst& i = emit_ir(IROp::Move); i.dst = cmp; i.src1 = acc; }
+                    { IRInst& i = emit_ir(IROp::Sub); i.dst = cmp; i.src1 = right; } // VF=1 if acc>=right
+                    { IRInst& i = emit_ir(IROp::BrVF); i.imm2 = 0; i.imm = end; }    // acc < right: done
+                    { IRInst& i = emit_ir(IROp::Sub); i.dst = acc; i.src1 = right; }
+                    { IRInst& i = emit_ir(IROp::AddI); i.dst = counter; i.imm = 1; }
+                    { IRInst& i = emit_ir(IROp::Jump); i.imm = loop; }
+                    { IRInst& i = emit_ir(IROp::Label); i.imm = end; }
+                    if (op == TokenType::DIVIDE) {
+                        IRInst& i = emit_ir(IROp::Move); i.dst = acc; i.src1 = counter;
+                    }
+                    break;
+                }
+                case TokenType::SHIFT_LEFT:
+                case TokenType::SHIFT_RIGHT: {
+                    VReg counter = fresh();
+                    { IRInst& i = emit_ir(IROp::Move); i.dst = counter; i.src1 = right; }
+                    int loop = F->new_label();
+                    int end = F->new_label();
+                    { IRInst& i = emit_ir(IROp::Label); i.imm = loop; }
+                    { IRInst& i = emit_ir(IROp::BrEqI); i.src1 = counter; i.imm2 = 0; i.imm = end; }
+                    { IRInst& i = emit_ir(op == TokenType::SHIFT_LEFT ? IROp::Shl : IROp::Shr); i.dst = acc; }
+                    { IRInst& i = emit_ir(IROp::AddI); i.dst = counter; i.imm = 0xFF; }
+                    { IRInst& i = emit_ir(IROp::Jump); i.imm = loop; }
+                    { IRInst& i = emit_ir(IROp::Label); i.imm = end; }
+                    break;
+                }
+                default:
+                    errorHandler.error("Invalid binary operator", current_stmt_line, current_stmt_col);
+                    break;
+            }
+            return acc;
+        }
+
+        VReg CodeGenerator::build_binary(BinaryExprNode& node, VReg hint) {
+            auto left_const = try_get_constant(node.left.get());
+            auto right_const = try_get_constant(node.right.get());
+
+            // Full constant folding
+            if (left_const && right_const) {
+                auto result = eval_binary_op(*left_const, *right_const, node.op);
+                if (result) {
+                    VReg r = (hint != NO_VREG) ? hint : fresh();
+                    IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = *result & 0xFF;
+                    return r;
+                }
+            }
+
+            // Immediate add/sub
+            if (right_const && (node.op == TokenType::PLUS || node.op == TokenType::MINUS)) {
+                VReg l = build_expr(node.left.get());
+                VReg acc = (hint != NO_VREG) ? hint : (l != NO_VREG ? fresh() : fresh());
+                if (l != acc) { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = l; }
+                int k = (node.op == TokenType::PLUS) ? (*right_const & 0xFF) : ((-*right_const) & 0xFF);
+                if (k != 0) { IRInst& a = emit_ir(IROp::AddI); a.dst = acc; a.imm = k; }
+                return acc;
+            }
+
+            // Strength-reduced multiply/divide/modulo by constant
+            if (right_const && (node.op == TokenType::MULTIPLY || node.op == TokenType::DIVIDE ||
+                                node.op == TokenType::MODULO)) {
+                int c = *right_const & 0xFF;
+                if ((node.op == TokenType::DIVIDE || node.op == TokenType::MODULO) && c == 0) {
+                    errorHandler.error("Division by zero", node.line, node.column);
+                    return (hint != NO_VREG) ? hint : fresh();
+                }
+                if (node.op == TokenType::MULTIPLY) {
+                    VReg l = build_expr(node.left.get());
+                    return mult_by_const(l, c, hint);
+                }
+                if (c == 1) {
+                    if (node.op == TokenType::MODULO) {
+                        build_expr(node.left.get()); // side effects only
+                        VReg r = (hint != NO_VREG) ? hint : fresh();
+                        IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = 0;
+                        return r;
+                    }
+                    return build_expr(node.left.get(), hint);
+                }
+                if ((c & (c - 1)) == 0) { // power of two
+                    int shifts = 0;
+                    while ((1 << shifts) < c) shifts++;
+                    if (node.op == TokenType::DIVIDE) {
+                        VReg l = build_expr(node.left.get());
+                        VReg acc = (hint != NO_VREG) ? hint : fresh();
+                        if (acc != l) { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = l; }
+                        for (int i = 0; i < shifts; i++) { IRInst& s = emit_ir(IROp::Shr); s.dst = acc; }
+                        return acc;
+                    } else { // MODULO: mask
+                        VReg l = build_expr(node.left.get());
+                        VReg acc = (hint != NO_VREG) ? hint : fresh();
+                        if (acc != l) { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = l; }
+                        VReg mask = fresh();
+                        { IRInst& k = emit_ir(IROp::Const); k.dst = mask; k.imm = (c - 1) & 0xFF; }
+                        { IRInst& a = emit_ir(IROp::And); a.dst = acc; a.src1 = mask; }
+                        return acc;
                     }
                 }
+                // Non-power-of-two divide/modulo falls through to runtime loop
             }
 
-            allocated = true;
-            uint8_t reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = reg;
-            expr->accept(*this);
-            current_result_reg = saved;
-            return reg;
+            // Constant shift counts unroll
+            if (right_const && (node.op == TokenType::SHIFT_LEFT || node.op == TokenType::SHIFT_RIGHT)) {
+                int n = *right_const & 0xFF;
+                VReg l = build_expr(node.left.get());
+                if (n == 0) return materialize(l, hint);
+                VReg acc = (hint != NO_VREG) ? hint : fresh();
+                if (n >= 8) {
+                    IRInst& k = emit_ir(IROp::Const); k.dst = acc; k.imm = 0;
+                    return acc;
+                }
+                if (acc != l) { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = l; }
+                for (int i = 0; i < n; i++) {
+                    IRInst& s = emit_ir(node.op == TokenType::SHIFT_LEFT ? IROp::Shl : IROp::Shr);
+                    s.dst = acc;
+                }
+                return acc;
+            }
+
+            // General case: accumulate into a register the caller may own.
+            // hint == l is fine (in-place x += y): the caller's reads-var
+            // check guarantees the right side cannot observe the target.
+            VReg l = build_expr(node.left.get());
+            VReg acc = (hint != NO_VREG) ? hint : fresh();
+            if (acc != l) { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = l; }
+            VReg r = build_expr(node.right.get());
+            return build_runtime_binop(acc, r, node.op);
         }
 
-        // Branch fusion: emits a conditional branch without materializing the
-        // condition as a 0/1 value. Evaluates cond and emits placeholder jumps
-        // that are TAKEN when the condition is true (jump_when_true) or false
-        // (otherwise); straight-line execution falls through in the opposite
-        // case. Returns the byte offsets of the placeholder jumps for the
-        // caller to patch to the branch target.
-        std::vector<uint16_t> CodeGenerator::emit_cond_branch(ExprNode* cond, bool jump_when_true) {
-            std::vector<uint16_t> out_fixups;
+        // Comparison in value position: produce 0/1
+        VReg CodeGenerator::build_condition_value(ConditionNode& node) {
+            VReg dst = fresh();
+            switch (node.op) {
+                case TokenType::EQUALS:
+                case TokenType::NOT_EQUALS: {
+                    int done = F->new_label();
+                    { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = (node.op == TokenType::EQUALS) ? 0 : 1; }
+                    VReg l = build_expr(node.left.get());
+                    auto rc = try_get_constant(node.right.get());
+                    if (rc) {
+                        IRInst& b = emit_ir(IROp::BrNeI);
+                        b.src1 = l; b.imm2 = *rc & 0xFF; b.imm = done;
+                    } else {
+                        VReg r = build_expr(node.right.get());
+                        IRInst& b = emit_ir(IROp::BrNe);
+                        b.src1 = l; b.src2 = r; b.imm = done;
+                    }
+                    { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = (node.op == TokenType::EQUALS) ? 1 : 0; }
+                    { IRInst& lb = emit_ir(IROp::Label); lb.imm = done; }
+                    break;
+                }
+                default: {
+                    // Ordered: t = a - b (or b - a), then read VF.
+                    //   a <  b: VF == 0 after (a - b)
+                    //   a >= b: VF == 1 after (a - b)
+                    //   a >  b: VF == 0 after (b - a)
+                    //   a <= b: VF == 1 after (b - a)
+                    bool swap = (node.op == TokenType::GREATER_THAN || node.op == TokenType::LESS_EQUAL);
+                    int want_vf = (node.op == TokenType::GREATER_EQUAL || node.op == TokenType::LESS_EQUAL) ? 1 : 0;
 
-            // !x inverts the branch sense
+                    VReg l = build_expr(node.left.get());
+                    VReg r = build_expr(node.right.get());
+                    VReg t = fresh();
+                    { IRInst& m = emit_ir(IROp::Move); m.dst = t; m.src1 = swap ? r : l; }
+                    { IRInst& s = emit_ir(IROp::Sub); s.dst = t; s.src1 = swap ? l : r; }
+                    int done = F->new_label();
+                    { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 1; }
+                    { IRInst& b = emit_ir(IROp::BrVF); b.imm2 = want_vf; b.imm = done; }
+                    { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 0; }
+                    { IRInst& lb = emit_ir(IROp::Label); lb.imm = done; }
+                    break;
+                }
+            }
+            return dst;
+        }
+
+        // Wait: Const dst,1 executes BEFORE the SUB in ordered comparisons
+        // above, which would clobber an operand if dst aliased one - but dst
+        // is always fresh, so intervals overlap and the allocator separates
+        // them.
+
+        VReg CodeGenerator::build_logical_value(LogicalExprNode& node) {
+            // Short-circuit, producing 0/1
+            VReg dst = fresh();
+            int set_short = F->new_label();
+            int done = F->new_label();
+
+            if (node.op == TokenType::AND_AND) {
+                build_branch(node.left.get(), set_short, false);   // left false -> 0
+                VReg r = build_expr(node.right.get());
+                { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 0; }
+                { IRInst& b = emit_ir(IROp::BrEqI); b.src1 = r; b.imm2 = 0; b.imm = done; }
+                { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 1; }
+                { IRInst& j = emit_ir(IROp::Jump); j.imm = done; }
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = set_short; }
+                { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 0; }
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = done; }
+            } else {
+                build_branch(node.left.get(), set_short, true);    // left true -> 1
+                VReg r = build_expr(node.right.get());
+                { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 0; }
+                { IRInst& b = emit_ir(IROp::BrEqI); b.src1 = r; b.imm2 = 0; b.imm = done; }
+                { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 1; }
+                { IRInst& j = emit_ir(IROp::Jump); j.imm = done; }
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = set_short; }
+                { IRInst& k = emit_ir(IROp::Const); k.dst = dst; k.imm = 1; }
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = done; }
+            }
+            return dst;
+        }
+
+        VReg CodeGenerator::build_expr(ExprNode* expr, VReg hint) {
+            if (!expr) {
+                errorHandler.error("Internal: null expression", current_stmt_line, current_stmt_col);
+                return (hint != NO_VREG) ? hint : fresh();
+            }
+
+            if (auto* num = dynamic_cast<NumberExprNode*>(expr)) {
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = num->value & 0xFF;
+                return r;
+            }
+            if (auto* str = dynamic_cast<StringExprNode*>(expr)) {
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& k = emit_ir(IROp::Const);
+                k.dst = r;
+                k.imm = str->value.empty() ? 0 : static_cast<uint8_t>(str->value[0]);
+                return r;
+            }
+            if (auto* var = dynamic_cast<VariableExprNode*>(expr)) {
+                // Named constant?
+                auto cit = constants.find(var->name);
+                if (cit != constants.end()) {
+                    VReg r = (hint != NO_VREG) ? hint : fresh();
+                    IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = cit->second & 0xFF;
+                    return r;
+                }
+                // Global (memory-backed)?
+                auto git = arrays.find(var->name);
+                if (git != arrays.end() && array_sizes.count(var->name) && array_sizes[var->name] == 1) {
+                    VReg r = (hint != NO_VREG) ? hint : fresh();
+                    IRInst& l = emit_ir(IROp::LoadG); l.dst = r; l.imm = git->second;
+                    return r;
+                }
+                // Local
+                auto vit = var_vregs.find(var->name);
+                if (vit == var_vregs.end()) {
+                    errorHandler.error("Undefined variable: " + var->name, expr->line, expr->column);
+                    return (hint != NO_VREG) ? hint : fresh();
+                }
+                return materialize(vit->second, hint);
+            }
+            if (auto* bin = dynamic_cast<BinaryExprNode*>(expr)) {
+                return build_binary(*bin, hint);
+            }
+            if (auto* cond = dynamic_cast<ConditionNode*>(expr)) {
+                return materialize(build_condition_value(*cond), hint);
+            }
+            if (auto* log = dynamic_cast<LogicalExprNode*>(expr)) {
+                return materialize(build_logical_value(*log), hint);
+            }
+            if (auto* un = dynamic_cast<UnaryExprNode*>(expr)) {
+                if (un->op == TokenType::NOT) {
+                    VReg t = build_expr(un->operand.get());
+                    VReg r = (hint != NO_VREG && hint != t) ? hint : fresh();
+                    int done = F->new_label();
+                    { IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = 1; }
+                    { IRInst& b = emit_ir(IROp::BrEqI); b.src1 = t; b.imm2 = 0; b.imm = done; }
+                    { IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = 0; }
+                    { IRInst& lb = emit_ir(IROp::Label); lb.imm = done; }
+                    return r;
+                }
+                // Unary minus: r = 0 - operand
+                VReg t = build_expr(un->operand.get());
+                VReg r = (hint != NO_VREG && hint != t) ? hint : fresh();
+                { IRInst& k = emit_ir(IROp::Const); k.dst = r; k.imm = 0; }
+                { IRInst& s = emit_ir(IROp::Sub); s.dst = r; s.src1 = t; }
+                return r;
+            }
+            if (auto* key = dynamic_cast<KeyExprNode*>(expr)) {
+                VReg k = build_expr(key->key_num.get());
+                VReg r = (hint != NO_VREG && hint != k) ? hint : fresh();
+                IRInst& i = emit_ir(IROp::KeyVal); i.dst = r; i.src1 = k;
+                return r;
+            }
+            if (dynamic_cast<WaitKeyExprNode*>(expr)) {
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& i = emit_ir(IROp::WaitKey); i.dst = r;
+                return r;
+            }
+            if (auto* rnd = dynamic_cast<RandExprNode*>(expr)) {
+                uint8_t mask = 0xFF;
+                if (auto mc = try_get_constant(rnd->max_val.get())) {
+                    mask = static_cast<uint8_t>(*mc & 0xFF);
+                }
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& i = emit_ir(IROp::Rand); i.dst = r; i.imm = mask;
+                return r;
+            }
+            if (dynamic_cast<CollisionExprNode*>(expr)) {
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& i = emit_ir(IROp::MoveFromVF); i.dst = r;
+                return r;
+            }
+            if (dynamic_cast<TimerExprNode*>(expr)) {
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& i = emit_ir(IROp::Timer); i.dst = r;
+                return r;
+            }
+            if (auto* arr = dynamic_cast<ArrayAccessExprNode*>(expr)) {
+                auto it = arrays.find(arr->array_name);
+                if (it == arrays.end()) {
+                    // Const ROM table (stored via the sprite machinery)
+                    auto rom_it = sprites.find(arr->array_name);
+                    if (rom_it != sprites.end()) {
+                        if (arr->indices.size() != 1) {
+                            errorHandler.error("Const table '" + arr->array_name + "' is one-dimensional",
+                                               expr->line, expr->column);
+                            return (hint != NO_VREG) ? hint : fresh();
+                        }
+                        VReg idx = build_expr(arr->indices[0].get());
+                        VReg r = (hint != NO_VREG) ? hint : fresh();
+                        IRInst& i = emit_ir(IROp::LoadIdx);
+                        i.dst = r; i.src1 = idx; i.imm = 0x200 + rom_it->second;
+                        return r;
+                    }
+                    errorHandler.error("Undefined array: " + arr->array_name, expr->line, expr->column);
+                    return (hint != NO_VREG) ? hint : fresh();
+                }
+                VReg idx = build_index(arr->indices, array_dims[arr->array_name]);
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& i = emit_ir(IROp::LoadIdx);
+                i.dst = r; i.src1 = idx; i.imm = it->second;
+                return r;
+            }
+            if (auto* call = dynamic_cast<FunctionCallExprNode*>(expr)) {
+                IRInst inst{IROp::Call};
+                for (const auto& arg : call->arguments) {
+                    inst.args.push_back(build_expr(arg.get()));
+                }
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& c = emit_ir(IROp::Call);
+                c.dst = r;
+                c.name = call->function_name;
+                c.args = std::move(inst.args);
+                return r;
+            }
+            if (auto* ent = dynamic_cast<EntityFieldAccessExpr*>(expr)) {
+                auto inst_it = entity_instances.find(ent->entity_name);
+                if (inst_it == entity_instances.end()) {
+                    errorHandler.error("Unknown entity variable: " + ent->entity_name, expr->line, expr->column);
+                    return (hint != NO_VREG) ? hint : fresh();
+                }
+                auto type_it = entity_types.find(inst_it->second.type_name);
+                int field_offset = -1;
+                if (type_it != entity_types.end()) {
+                    for (const auto& field : type_it->second.fields) {
+                        if (field.name == ent->field_name) { field_offset = field.offset; break; }
+                    }
+                }
+                if (field_offset < 0) {
+                    errorHandler.error("Unknown field '" + ent->field_name + "' in entity '" +
+                                       inst_it->second.type_name + "'", expr->line, expr->column);
+                    return (hint != NO_VREG) ? hint : fresh();
+                }
+                int esize = type_it->second.size;
+
+                VReg idx;
+                if (ent->index) {
+                    VReg iv = build_expr(ent->index.get());
+                    idx = mult_by_const(iv, esize);
+                    if (field_offset > 0) {
+                        VReg acc = fresh();
+                        { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = idx; }
+                        { IRInst& a = emit_ir(IROp::AddI); a.dst = acc; a.imm = field_offset & 0xFF; }
+                        idx = acc;
+                    }
+                } else {
+                    idx = fresh();
+                    IRInst& k = emit_ir(IROp::Const); k.dst = idx; k.imm = field_offset & 0xFF;
+                }
+                VReg r = (hint != NO_VREG) ? hint : fresh();
+                IRInst& i = emit_ir(IROp::LoadIdx);
+                i.dst = r; i.src1 = idx; i.imm = inst_it->second.base_addr;
+                return r;
+            }
+
+            errorHandler.error("Internal: unhandled expression node", expr->line, expr->column);
+            return (hint != NO_VREG) ? hint : fresh();
+        }
+
+        // Linear index for (possibly multi-dimensional) array access
+        VReg CodeGenerator::build_index(const std::vector<std::unique_ptr<ExprNode>>& indices,
+                                        const std::vector<int>& dims) {
+            VReg idx = build_expr(indices[0].get());
+            if (indices.size() == 1) return idx;
+
+            VReg acc = fresh();
+            { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = idx; }
+            for (size_t i = 1; i < indices.size() && i < dims.size(); i++) {
+                acc = mult_by_const(acc, dims[i]);
+                VReg next = build_expr(indices[i].get());
+                IRInst& a = emit_ir(IROp::Add); a.dst = acc; a.src1 = next;
+            }
+            return acc;
+        }
+
+        // ------------------------------------------------------------------
+        // Branch building (fused conditions)
+        // ------------------------------------------------------------------
+
+        void CodeGenerator::build_branch(ExprNode* cond, int target, bool jump_when_true) {
+            // !x inverts
             if (auto* un = dynamic_cast<UnaryExprNode*>(cond)) {
                 if (un->op == TokenType::NOT) {
-                    return emit_cond_branch(un->operand.get(), !jump_when_true);
+                    build_branch(un->operand.get(), target, !jump_when_true);
+                    return;
                 }
             }
 
-            // Known-constant condition: unconditional jump or nothing.
-            // Makes while(1) loop bodies branch-free.
+            // Constant condition
             if (auto cval = try_get_constant(cond)) {
-                bool truth = (*cval != 0);
-                if (truth == jump_when_true) {
-                    out_fixups.push_back(static_cast<uint16_t>(output.size()));
-                    emit_jump(0); // placeholder
+                if ((*cval != 0) == jump_when_true) {
+                    IRInst& j = emit_ir(IROp::Jump); j.imm = target;
                 }
-                return out_fixups;
+                return;
             }
 
-            // Short-circuit && / || as jump chains
+            // Short-circuit && / ||
             if (auto* log = dynamic_cast<LogicalExprNode*>(cond)) {
                 if (log->op == TokenType::AND_AND) {
                     if (!jump_when_true) {
-                        // (a && b) false: jump if a false, else jump if b false
-                        auto f1 = emit_cond_branch(log->left.get(), false);
-                        auto f2 = emit_cond_branch(log->right.get(), false);
-                        f1.insert(f1.end(), f2.begin(), f2.end());
-                        return f1;
+                        build_branch(log->left.get(), target, false);
+                        build_branch(log->right.get(), target, false);
+                    } else {
+                        int after = F->new_label();
+                        build_branch(log->left.get(), after, false);
+                        build_branch(log->right.get(), target, true);
+                        IRInst& lb = emit_ir(IROp::Label); lb.imm = after;
                     }
-                    // (a && b) true: if a false skip past the b test
-                    auto skip = emit_cond_branch(log->left.get(), false);
-                    auto taken = emit_cond_branch(log->right.get(), true);
-                    for (uint16_t at : skip) patch_jump_at(at, static_cast<uint16_t>(output.size()));
-                    return taken;
-                } else { // OR_OR
+                } else { // OR
                     if (jump_when_true) {
-                        auto f1 = emit_cond_branch(log->left.get(), true);
-                        auto f2 = emit_cond_branch(log->right.get(), true);
-                        f1.insert(f1.end(), f2.begin(), f2.end());
-                        return f1;
+                        build_branch(log->left.get(), target, true);
+                        build_branch(log->right.get(), target, true);
+                    } else {
+                        int after = F->new_label();
+                        build_branch(log->left.get(), after, true);
+                        build_branch(log->right.get(), target, false);
+                        IRInst& lb = emit_ir(IROp::Label); lb.imm = after;
                     }
-                    // (a || b) false: if a true skip past the b test
-                    auto skip = emit_cond_branch(log->left.get(), true);
-                    auto taken = emit_cond_branch(log->right.get(), false);
-                    for (uint16_t at : skip) patch_jump_at(at, static_cast<uint16_t>(output.size()));
-                    return taken;
                 }
+                return;
             }
 
             if (auto* cmp = dynamic_cast<ConditionNode*>(cond)) {
-                // No destination register exists in branch context; neutralize
-                // current_result_reg so the operand-alias guard in
-                // get_comparison_operand never forces a spurious copy
-                // (variables never live in V0)
-                uint8_t saved_crr = current_result_reg;
-                current_result_reg = 0;
-
-                // We always emit skip-if-TRUE followed by the placeholder jump,
-                // so a taken jump means the effective comparison was FALSE.
-                // For jump_when_true, test the inverted comparison instead.
                 TokenType op = cmp->op;
-                if (jump_when_true) {
+                if (!jump_when_true) {
+                    // Invert the comparison; we always emit jump-when-true
                     switch (op) {
                         case TokenType::EQUALS:        op = TokenType::NOT_EQUALS; break;
                         case TokenType::NOT_EQUALS:    op = TokenType::EQUALS; break;
@@ -638,608 +675,107 @@
                 }
 
                 if (op == TokenType::EQUALS || op == TokenType::NOT_EQUALS) {
+                    VReg l = build_expr(cmp->left.get());
                     auto rc = try_get_constant(cmp->right.get());
-                    bool l_alloc = false, r_alloc = false;
-                    uint8_t l = get_comparison_operand(cmp->left.get(), l_alloc);
                     if (rc) {
-                        // SE/SNE Vx, kk immediate forms
-                        emit_opcode((op == TokenType::EQUALS ? 0x3000 : 0x4000) | (l << 8) | (*rc & 0xFF));
+                        IRInst& b = emit_ir(op == TokenType::EQUALS ? IROp::BrEqI : IROp::BrNeI);
+                        b.src1 = l; b.imm2 = *rc & 0xFF; b.imm = target;
                     } else {
-                        uint8_t r = get_comparison_operand(cmp->right.get(), r_alloc);
-                        emit_opcode((op == TokenType::EQUALS ? 0x5000 : 0x9000) | (l << 8) | (r << 4));
-                        if (r_alloc) free_register(r);
+                        VReg r = build_expr(cmp->right.get());
+                        IRInst& b = emit_ir(op == TokenType::EQUALS ? IROp::BrEq : IROp::BrNe);
+                        b.src1 = l; b.src2 = r; b.imm = target;
                     }
-                    if (l_alloc) free_register(l);
                 } else {
-                    // Ordered comparison via SUB borrow flag:
-                    //   l <  r:  VF == 0 after (l - r)
-                    //   l >= r:  VF == 1 after (l - r)
-                    //   l >  r:  VF == 0 after (r - l)
-                    //   l <= r:  VF == 1 after (r - l)
-                    // Evaluation stays left-then-right for side-effect order.
                     bool swap = (op == TokenType::GREATER_THAN || op == TokenType::LESS_EQUAL);
                     int want_vf = (op == TokenType::GREATER_EQUAL || op == TokenType::LESS_EQUAL) ? 1 : 0;
-
-                    bool a_alloc = false;
-                    uint8_t temp;
-                    if (!swap) {
-                        // temp = left; SUB temp, right
-                        temp = allocate_register();
-                        uint8_t saved = current_result_reg;
-                        current_result_reg = temp;
-                        cmp->left->accept(*this);
-                        current_result_reg = saved;
-
-                        uint8_t r = get_comparison_operand(cmp->right.get(), a_alloc);
-                        emit_opcode(0x8000 | (temp << 8) | (r << 4) | 0x5); // SUB temp, right
-                        if (a_alloc) free_register(r);
-                    } else {
-                        // temp = right; SUB temp, left
-                        uint8_t l = get_comparison_operand(cmp->left.get(), a_alloc);
-                        temp = allocate_register();
-                        uint8_t saved = current_result_reg;
-                        current_result_reg = temp;
-                        cmp->right->accept(*this);
-                        current_result_reg = saved;
-
-                        emit_opcode(0x8000 | (temp << 8) | (l << 4) | 0x5); // SUB temp, left
-                        if (a_alloc) free_register(l);
-                    }
-                    free_register(temp);
-                    emit_opcode(0x3000 | (0xF << 8) | (want_vf & 0xFF)); // SE VF, want -> skip when true
+                    VReg l = build_expr(cmp->left.get());
+                    VReg r = build_expr(cmp->right.get());
+                    VReg t = fresh();
+                    { IRInst& m = emit_ir(IROp::Move); m.dst = t; m.src1 = swap ? r : l; }
+                    { IRInst& s = emit_ir(IROp::Sub); s.dst = t; s.src1 = swap ? l : r; }
+                    { IRInst& b = emit_ir(IROp::BrVF); b.imm2 = want_vf; b.imm = target; }
                 }
-
-                current_result_reg = saved_crr;
-                out_fixups.push_back(static_cast<uint16_t>(output.size()));
-                emit_jump(0); // placeholder, taken when comparison is false
-                return out_fixups;
+                return;
             }
 
-            // Generic truthiness: evaluate the expression, branch on != 0
-            uint8_t temp = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = temp;
-            cond->accept(*this);
-            current_result_reg = saved;
-            // jump_when_false: SNE temp,0 skips the jump when temp != 0 (true)
-            // jump_when_true:  SE temp,0 skips the jump when temp == 0 (false)
-            emit_opcode((jump_when_true ? 0x3000 : 0x4000) | (temp << 8) | 0x00);
-            free_register(temp);
-            out_fixups.push_back(static_cast<uint16_t>(output.size()));
-            emit_jump(0); // placeholder
-            return out_fixups;
+            // Generic truthiness
+            VReg t = build_expr(cond);
+            IRInst& b = emit_ir(jump_when_true ? IROp::BrNeI : IROp::BrEqI);
+            b.src1 = t; b.imm2 = 0; b.imm = target;
         }
 
-        void CodeGenerator::visit(IfNode& node) {
-            // Branch fusion: jump directly to else/end when the condition is
-            // false; no boolean value is materialized
-            auto else_fixups = emit_cond_branch(node.condition.get(), false);
+        // ------------------------------------------------------------------
+        // Statement building (visitor methods)
+        // ------------------------------------------------------------------
 
-            // then branch
-            node.then_branch->accept(*this);
-
-            uint16_t jump_to_end_at = 0;
-            if (node.else_branch) {
-                jump_to_end_at = output.size();
-                emit_jump(0); // placeholder to jump over else
-            }
-
-            // false-branches land here (start of else, or end)
-            for (uint16_t at : else_fixups) {
-                patch_jump_at(at, static_cast<uint16_t>(output.size()));
-            }
-
-            // else branch (if any)
-            if (node.else_branch) {
-                node.else_branch->accept(*this);
-                patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
-            }
-        }
-
-        void CodeGenerator::visit(WhileNode& node) {
-            uint16_t loop_start = static_cast<uint16_t>(output.size());
-
-            // Push loop context for break/continue
-            loop_stack.push_back({loop_start, {}, {}, false});
-
-            // Branch fusion: jump to loop end when the condition is false.
-            // For while(1) this emits nothing at all.
-            auto end_fixups = emit_cond_branch(node.condition.get(), false);
-
-            // body
-            node.body->accept(*this);
-
-            // jump back to start
-            emit_jump(loop_start);
-
-            // patch end target
-            uint16_t loop_end = static_cast<uint16_t>(output.size());
-            for (uint16_t at : end_fixups) {
-                patch_jump_at(at, loop_end);
-            }
-
-            // Patch all break statements
-            for (uint16_t break_addr : loop_stack.back().break_fixups) {
-                patch_jump_at(break_addr, loop_end);
-            }
-            loop_stack.pop_back();
-        }
-
-        void CodeGenerator::visit(ForNode& node) {
-            // Execute init statement
-            if (node.init) {
-                node.init->accept(*this);
-            }
-
-            uint16_t loop_start = static_cast<uint16_t>(output.size());
-
-            // Branch fusion: jump to loop end when the condition is false
-            auto end_fixups = emit_cond_branch(node.condition.get(), false);
-
-            // For continue in for-loops, we need to jump to the increment, not the condition
-            // We use fixups because we don't know the increment address until after the body
-
-            // Push loop context - mark as for-loop so continue uses fixups
-            loop_stack.push_back({0, {}, {}, true}); // is_for_loop = true
-
-            // body
-            node.body->accept(*this);
-
-            // Record increment start and patch all continue statements
-            uint16_t increment_start = static_cast<uint16_t>(output.size());
-            for (uint16_t continue_addr : loop_stack.back().continue_fixups) {
-                patch_jump_at(continue_addr, increment_start);
-            }
-
-            // increment
-            if (node.increment) {
-                node.increment->accept(*this);
-            }
-
-            // jump back to start (condition check)
-            emit_jump(loop_start);
-
-            // patch end target
-            uint16_t loop_end = static_cast<uint16_t>(output.size());
-            for (uint16_t at : end_fixups) {
-                patch_jump_at(at, loop_end);
-            }
-
-            // Patch all break statements
-            for (uint16_t break_addr : loop_stack.back().break_fixups) {
-                patch_jump_at(break_addr, loop_end);
-            }
-            loop_stack.pop_back();
-        }
-
-        void CodeGenerator::visit(DrawNode& node) {
-            // Evaluate x coordinate expression into a register
-            uint8_t x_reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = x_reg;
-            node.x_expr->accept(*this);
-            current_result_reg = saved;
-
-            // Evaluate y coordinate expression into a register
-            uint8_t y_reg = allocate_register();
-            saved = current_result_reg;
-            current_result_reg = y_reg;
-            node.y_expr->accept(*this);
-            current_result_reg = saved;
-
-            int height = node.height;
-
-            if (!node.sprite_name.empty()) {
-                // Custom sprite - look up address in sprites map
-                auto it = sprites.find(node.sprite_name);
-                if (it == sprites.end()) {
-                    errorHandler.error("Undefined sprite: " + node.sprite_name, node.line, node.column);
-                    return;
+        void CodeGenerator::build_block(BlockNode& block) {
+            bool terminated = false;
+            for (auto& stmt : block.statements) {
+                if (terminated) {
+                    errorHandler.warning("Unreachable code after return/break/continue",
+                                         stmt->line, stmt->column);
+                    break;
                 }
-                uint16_t sprite_addr = 0x200 + it->second; // Absolute address
-                emit_opcode(0xA000 | (sprite_addr & 0x0FFF)); // LD I, addr
-
-                // If height was 0, infer from sprite definition
-                if (height == 0) {
-                    auto height_it = sprite_heights.find(node.sprite_name);
-                    if (height_it != sprite_heights.end()) {
-                        height = height_it->second;
-                    } else {
-                        height = 5; // Default fallback
-                    }
+                if (stmt->line > 0) {
+                    current_stmt_line = stmt->line;
+                    current_stmt_col = stmt->column;
                 }
-            } else {
-                // Built-in font sprite (0x000-0x050, 5 bytes each)
-                uint16_t char_addr = static_cast<uint16_t>(node.sprite_id * 5);
-                emit_opcode(0xA000 | (char_addr & 0x0FFF)); // LD I, addr
+                stmt->accept(*this);
+                if (dynamic_cast<ReturnNode*>(stmt.get()) ||
+                    dynamic_cast<BreakNode*>(stmt.get()) ||
+                    dynamic_cast<ContinueNode*>(stmt.get())) {
+                    terminated = true;
+                }
             }
-
-            // Draw the sprite
-            emit_opcode(0xD000 | (x_reg << 8) | (y_reg << 4) | (height & 0xF)); // DRW Vx, Vy, nibble
-
-            // Free temporary registers
-            free_register(x_reg);
-            free_register(y_reg);
         }
 
-        void CodeGenerator::visit(ClearNode& /*node*/) {
-            emit_opcode(0x00E0); // CLS
-        }
+        void CodeGenerator::visit(BlockNode& node) { build_block(node); }
 
-        void CodeGenerator::visit(WaitNode& node) {
-            uint8_t delay_reg = 0; // V0
-
-            if (node.type == WaitNode::WaitType::FIXED) {
-                uint8_t ticks = static_cast<uint8_t>((node.fixed_duration / 16) & 0xFF); // approx 60Hz
-                if (ticks == 0) ticks = 1; // Minimum 1 tick
-                emit_opcode(0x6000 | (delay_reg << 8) | ticks); // LD V0, ticks
-            } else if (node.type == WaitNode::WaitType::VARIABLE) {
-                if (auto* num_expr = dynamic_cast<NumberExprNode*>(node.duration.get())) {
-                    uint8_t ticks = static_cast<uint8_t>((num_expr->value / 16) & 0xFF);
-                    if (ticks == 0) ticks = 1;
-                    emit_opcode(0x6000 | (delay_reg << 8) | ticks); // LD V0, ticks
+        void CodeGenerator::visit(VariableDeclNode& node) {
+            if (var_vregs.count(node.name)) {
+                errorHandler.error("Variable '" + node.name + "' already declared", node.line, node.column);
+                return;
+            }
+            VReg v = fresh();
+            var_vregs[node.name] = v;
+            if (node.initializer) {
+                bool unsafe = expr_reads_var(node.initializer.get(), node.name, true);
+                if (!unsafe) {
+                    build_expr(node.initializer.get(), v);
                 } else {
-                    // Evaluate expression into V0, then convert ms -> 60Hz ticks
-                    // (divide by 16 via shifts) with a minimum of 1 tick, matching
-                    // the constant case above
-                    uint8_t saved = current_result_reg;
-                    current_result_reg = delay_reg;
-                    node.duration->accept(*this);
-                    current_result_reg = saved;
-                    for (int s = 0; s < 4; s++) {
-                        emit_opcode(0x8000 | (delay_reg << 8) | (delay_reg << 4) | 0x6); // SHR V0
-                    }
-                    emit_opcode(0x4000 | (delay_reg << 8) | 0x00); // SNE V0, 0 -> skip if nonzero
-                    emit_opcode(0x7000 | (delay_reg << 8) | 0x01); // ADD V0, 1
+                    VReg r = build_expr(node.initializer.get());
+                    IRInst& m = emit_ir(IROp::Move); m.dst = v; m.src1 = r;
                 }
             }
-
-            // Set the delay timer
-            emit_opcode(0xF015); // LD DT, V0
-
-            // Wait for the timer to reach 0
-            // Use a unique label for this wait loop to survive peephole optimization
-            static int wait_counter = 0;
-            std::string wait_label = "__wait_" + std::to_string(wait_counter++);
-            labels[wait_label] = static_cast<uint16_t>(output.size());
-            
-            emit_opcode(0xF007); // LD V0, DT
-            emit_opcode(0x3000 | (delay_reg << 8) | 0x00); // SE V0, 0 -> skip jump if zero (exit)
-            
-            // Use fixup so peephole optimization doesn't break the jump target
-            uint16_t jump_at = static_cast<uint16_t>(output.size());
-            emit_opcode(0x1000); // placeholder JP
-            fixups.push_back({jump_at, wait_label, false});
         }
 
-        void CodeGenerator::visit(KeyExprNode& node) {
-            // Evaluate key number into a temp register
-            uint8_t key_reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = key_reg;
-            node.key_num->accept(*this);
-            current_result_reg = saved;
-
-            // Set result to 1 (assume pressed)
-            emit_opcode(0x6000 | (current_result_reg << 8) | 0x01); // LD dest, 1
-            // Skip next if key is pressed (Ex9E)
-            emit_opcode(0xE09E | (key_reg << 8)); // SKP Vx
-            // Key not pressed, set result to 0
-            emit_opcode(0x6000 | (current_result_reg << 8) | 0x00); // LD dest, 0
-
-            free_register(key_reg);
-        }
-
-        void CodeGenerator::visit(WaitKeyExprNode& /*node*/) {
-            // Fx0A - wait for key press, store key in Vx
-            emit_opcode(0xF00A | (current_result_reg << 8)); // LD Vx, K
-        }
-
-        void CodeGenerator::visit(RandExprNode& node) {
-            // Evaluate max value
-            uint8_t mask = 0xFF;
-            if (auto* num_expr = dynamic_cast<NumberExprNode*>(node.max_val.get())) {
-                mask = static_cast<uint8_t>(num_expr->value & 0xFF);
+        void CodeGenerator::visit(AssignmentNode& node) {
+            // Global?
+            auto git = arrays.find(node.name);
+            if (git != arrays.end() && array_sizes.count(node.name) && array_sizes[node.name] == 1) {
+                VReg r = build_expr(node.value.get());
+                IRInst& s = emit_ir(IROp::StoreG); s.src1 = r; s.imm = git->second;
+                return;
             }
-            // Cxnn - Vx = random byte AND nn
-            emit_opcode(0xC000 | (current_result_reg << 8) | mask);
-        }
-
-        void CodeGenerator::visit(CollisionExprNode& /*node*/) {
-            // Copy VF to current_result_reg
-            emit_opcode(0x8000 | (current_result_reg << 8) | (0xF << 4) | 0x0); // LD Vx, VF
-        }
-
-        void CodeGenerator::visit(BeepNode& node) {
-            uint8_t sound_reg = 0; // V0
-
-            // Evaluate duration into V0
-            if (auto* num_expr = dynamic_cast<NumberExprNode*>(node.duration.get())) {
-                emit_opcode(0x6000 | (sound_reg << 8) | (num_expr->value & 0xFF)); // LD V0, byte
-            } else if (auto* var_expr = dynamic_cast<VariableExprNode*>(node.duration.get())) {
-                uint8_t var_reg = get_variable_register(var_expr->name);
-                emit_opcode(0x8000 | (sound_reg << 8) | (var_reg << 4) | 0x0); // LD V0, Vx
+            auto vit = var_vregs.find(node.name);
+            if (vit == var_vregs.end()) {
+                errorHandler.error("Undefined variable: " + node.name, node.line, node.column);
+                return;
+            }
+            VReg v = vit->second;
+            // Accumulate directly into the variable when the right-hand side
+            // cannot observe it (the left spine is evaluated first, so reads
+            // there are fine)
+            bool unsafe = expr_reads_var(node.value.get(), node.name, true);
+            if (!unsafe) {
+                build_expr(node.value.get(), v);
             } else {
-                uint8_t saved = current_result_reg;
-                current_result_reg = sound_reg;
-                node.duration->accept(*this);
-                current_result_reg = saved;
-            }
-
-            // Fx18 - set sound timer
-            emit_opcode(0xF018 | (sound_reg << 8)); // LD ST, V0
-        }
-
-        void CodeGenerator::visit(SpriteDefNode& node) {
-            // Jump over the data so a sprite/table declared inside a function
-            // body is never executed as code
-            uint16_t skip_at = static_cast<uint16_t>(output.size());
-            emit_jump(0); // placeholder
-
-            // Record sprite address and height
-            sprites[node.name] = static_cast<uint16_t>(output.size());
-            sprite_heights[node.name] = node.height;
-
-            // Emit sprite data bytes
-            for (uint8_t byte : node.data) {
-                emit_byte(byte);
-            }
-
-            // Pad to even address (CHIP-8 requires 2-byte aligned instructions)
-            if (output.size() % 2 != 0) {
-                emit_byte(0x00);
-            }
-
-            // Record the data extent so the peephole pass never treats these
-            // bytes as instructions (a data pair like 70 00 looks like ADD V0,0)
-            data_regions.push_back({sprites[node.name], static_cast<uint16_t>(output.size())});
-
-            patch_jump_at(skip_at, static_cast<uint16_t>(output.size()));
-        }
-
-        void CodeGenerator::visit(BreakNode& /*node*/) {
-            if (loop_stack.empty()) {
-                errorHandler.error("break outside of loop", current_stmt_line, current_stmt_col);
-                return;
-            }
-            // Emit jump placeholder, will be patched when loop ends
-            uint16_t break_addr = static_cast<uint16_t>(output.size());
-            emit_jump(0); // placeholder
-            loop_stack.back().break_fixups.push_back(break_addr);
-        }
-
-        void CodeGenerator::visit(ContinueNode& /*node*/) {
-            if (loop_stack.empty()) {
-                errorHandler.error("continue outside of loop", current_stmt_line, current_stmt_col);
-                return;
-            }
-            if (loop_stack.back().is_for_loop) {
-                // For loops: use fixup because we don't know increment address yet
-                uint16_t continue_addr = static_cast<uint16_t>(output.size());
-                emit_jump(0); // placeholder
-                loop_stack.back().continue_fixups.push_back(continue_addr);
-            } else {
-                // While loops: jump directly to continue target (loop start)
-                emit_jump(loop_stack.back().continue_target);
-            }
-        }
-
-        void CodeGenerator::visit(TimerExprNode& /*node*/) {
-            // Fx07 - read delay timer into current_result_reg
-            emit_opcode(0xF007 | (current_result_reg << 8)); // LD Vx, DT
-        }
-
-        void CodeGenerator::visit(UnaryExprNode& node) {
-            // Evaluate operand into current_result_reg
-            node.operand->accept(*this);
-
-            if (node.op == TokenType::NOT) {
-                // Logical NOT: if operand == 0, result = 1, else result = 0
-                // Use a temp register to hold the result
-                uint8_t temp_reg = allocate_register();
-                emit_opcode(0x6000 | (temp_reg << 8) | 0x01);            // LD temp, 1 (assume zero)
-                emit_opcode(0x3000 | (current_result_reg << 8) | 0x00); // SE Vx, 0 -> skip if zero
-                emit_opcode(0x6000 | (temp_reg << 8) | 0x00);            // LD temp, 0 (was non-zero)
-                emit_opcode(0x8000 | (current_result_reg << 8) | (temp_reg << 4) | 0x0); // LD Vx, temp
-                free_register(temp_reg);
-            } else if (node.op == TokenType::MINUS) {
-                // Unary minus: dest = 0 - operand (8-bit two's complement wrap)
-                uint8_t temp_reg = allocate_register();
-                emit_opcode(0x8000 | (temp_reg << 8) | (current_result_reg << 4) | 0x0); // LD temp, dest
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x00);                  // LD dest, 0
-                emit_opcode(0x8000 | (current_result_reg << 8) | (temp_reg << 4) | 0x5); // SUB dest, temp
-                free_register(temp_reg);
-            }
-        }
-
-        void CodeGenerator::visit(DrawNumNode& node) {
-            // BCD display: uses Fx33 to convert value to BCD at I, I+1, I+2
-            // Then draws three digits
-
-            // Evaluate value into a temp register first
-            uint8_t val_reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = val_reg;
-            node.value->accept(*this);
-            current_result_reg = saved;
-
-            // Evaluate x coordinate expression into a register
-            uint8_t x_reg = allocate_register();
-            saved = current_result_reg;
-            current_result_reg = x_reg;
-            node.x_expr->accept(*this);
-            current_result_reg = saved;
-
-            // Evaluate y coordinate expression into a register
-            uint8_t y_reg = allocate_register();
-            saved = current_result_reg;
-            current_result_reg = y_reg;
-            node.y_expr->accept(*this);
-            current_result_reg = saved;
-
-            // Use a safe address for BCD storage at end of memory (0xFD0-0xFD2)
-            // This avoids corrupting program code which can extend past 0xEF0 for large ROMs
-            emit_opcode(0xAFD0); // LD I, 0xFD0
-
-            // Fx33 - store BCD of Vx at I, I+1, I+2
-            emit_opcode(0xF033 | (val_reg << 8)); // LD B, Vx
-
-            // Draw hundreds digit
-            emit_opcode(0xF065); // LD V0, [I] - load BCD digits into V0
-            emit_opcode(0xF029); // LD F, V0 - point I to font for digit
-            emit_opcode(0xD000 | (x_reg << 8) | (y_reg << 4) | 0x5); // DRW Vx, Vy, 5
-
-            // Move x += 5 for tens digit
-            emit_opcode(0x7005 | (x_reg << 8)); // ADD Vx, 5
-
-            // Load tens digit
-            emit_opcode(0xAFD1); // LD I, 0xFD1
-            emit_opcode(0xF065); // LD V0, [I]
-            emit_opcode(0xF029); // LD F, V0
-            emit_opcode(0xD000 | (x_reg << 8) | (y_reg << 4) | 0x5); // DRW
-
-            // Move x += 5 for units digit
-            emit_opcode(0x7005 | (x_reg << 8)); // ADD Vx, 5
-
-            // Load units digit
-            emit_opcode(0xAFD2); // LD I, 0xFD2
-            emit_opcode(0xF065); // LD V0, [I]
-            emit_opcode(0xF029); // LD F, V0
-            emit_opcode(0xD000 | (x_reg << 8) | (y_reg << 4) | 0x5); // DRW
-
-            // Restore x position (subtract 10)
-            emit_opcode(0x70F6 | (x_reg << 8)); // ADD Vx, -10 (0xF6 = -10)
-
-            free_register(val_reg);
-            free_register(x_reg);
-            free_register(y_reg);
-        }
-
-        void CodeGenerator::visit(ArrayDeclNode& node) {
-            // Check if array is already declared
-            if (arrays.find(node.name) != arrays.end()) {
-                errorHandler.error("Array '" + node.name + "' already declared", node.line, node.column);
-                return;
-            }
-
-            // Allocate memory for the array
-            arrays[node.name] = next_array_addr;
-            array_sizes[node.name] = node.size;
-            array_dims[node.name] = node.dimensions;
-            next_array_addr += static_cast<uint16_t>(node.size);
-
-            // Check for memory overflow - arrays share space with runtime stack
-            // Runtime stack starts at CALLER_SAVE_BASE (0xF50), so arrays should stay below that
-            if (next_array_addr > CALLER_SAVE_BASE - 0x10) {
-                errorHandler.error("Array allocation exceeds available memory (approaching stack area at 0x" + 
-                                  std::to_string(CALLER_SAVE_BASE) + ")", node.line, node.column);
-            } else if (next_array_addr > CALLER_SAVE_BASE - 0x100) {
-                errorHandler.warning("Memory usage high: arrays using " + 
-                                    std::to_string(next_array_addr - 0x800) + " bytes, " +
-                                    std::to_string(CALLER_SAVE_BASE - next_array_addr) + " bytes remaining",
-                                    node.line, node.column);
-            }
-        }
-
-        void CodeGenerator::visit(ArrayAccessExprNode& node) {
-            // arr[i] or arr[i][j] - read array element into current_result_reg
-            auto it = arrays.find(node.array_name);
-            if (it == arrays.end()) {
-                // Const ROM table (const byte name[] = {...}) - read-only
-                // indexed load from program memory
-                auto rom_it = sprites.find(node.array_name);
-                if (rom_it != sprites.end()) {
-                    if (node.indices.size() != 1) {
-                        errorHandler.error("Const table '" + node.array_name + "' is one-dimensional",
-                                           node.line, node.column);
-                        return;
-                    }
-                    // Evaluate index into V0
-                    uint8_t saved = current_result_reg;
-                    current_result_reg = 0;
-                    node.indices[0]->accept(*this);
-                    current_result_reg = saved;
-
-                    uint16_t base_addr = 0x200 + rom_it->second;
-                    emit_opcode(0xA000 | (base_addr & 0x0FFF)); // LD I, base
-                    emit_opcode(0xF01E);                        // ADD I, V0
-                    emit_opcode(0xF065);                        // LD V0, [I]
-                    if (current_result_reg != 0) {
-                        emit_opcode(0x8000 | (current_result_reg << 8)); // LD Vx, V0
-                    }
-                    return;
-                }
-                errorHandler.error("Undefined array: " + node.array_name, node.line, node.column);
-                return;
-            }
-            uint16_t base_addr = it->second;
-            auto& dims = array_dims[node.array_name];
-
-            // Compute linear index from multi-dimensional indices
-            // For arr[d0][d1][d2] with access arr[i][j][k]: offset = i*d1*d2 + j*d2 + k
-            uint8_t idx_reg = 0; // Use V0 for final index
-            uint8_t saved = current_result_reg;
-
-            if (node.indices.size() == 1) {
-                // Simple 1D access
-                current_result_reg = idx_reg;
-                node.indices[0]->accept(*this);
-                current_result_reg = saved;
-            } else {
-                // Multi-dimensional: compute linear offset
-                // Start with first index
-                current_result_reg = idx_reg;
-                node.indices[0]->accept(*this);
-                current_result_reg = saved;
-
-                // For each subsequent index, multiply by dimension and add
-                for (size_t i = 1; i < node.indices.size() && i < dims.size(); i++) {
-                    // idx_reg = idx_reg * dims[i]
-                    uint8_t mult_reg = allocate_register();
-                    emit_opcode(0x6000 | (mult_reg << 8) | (dims[i] & 0xFF)); // LD mult_reg, dims[i]
-                    
-                    // Multiply using repeated addition
-                    uint8_t temp_reg = allocate_register();
-                    emit_opcode(0x8000 | (temp_reg << 8) | (idx_reg << 4) | 0x0); // LD temp, idx
-                    emit_opcode(0x6000 | (idx_reg << 8) | 0x00); // LD idx, 0
-                    uint16_t mult_loop = static_cast<uint16_t>(output.size());
-                    emit_opcode(0x3000 | (mult_reg << 8) | 0x00); // SE mult_reg, 0
-                    uint16_t mult_end = output.size();
-                    emit_jump(0); // placeholder
-                    emit_opcode(0x8000 | (idx_reg << 8) | (temp_reg << 4) | 0x4); // ADD idx, temp
-                    emit_opcode(0x7000 | (mult_reg << 8) | 0xFF); // ADD mult_reg, -1
-                    emit_jump(mult_loop);
-                    patch_jump_at(mult_end, static_cast<uint16_t>(output.size()));
-                    free_register(mult_reg);
-                    free_register(temp_reg);
-
-                    // Add current index
-                    uint8_t cur_idx_reg = allocate_register();
-                    current_result_reg = cur_idx_reg;
-                    node.indices[i]->accept(*this);
-                    current_result_reg = saved;
-                    emit_opcode(0x8000 | (idx_reg << 8) | (cur_idx_reg << 4) | 0x4); // ADD idx, cur_idx
-                    free_register(cur_idx_reg);
-                }
-            }
-
-            // Set I = base_addr
-            emit_opcode(0xA000 | (base_addr & 0x0FFF)); // LD I, base_addr
-
-            // Add index to I: I = I + V0 (via Fx1E)
-            emit_opcode(0xF01E | (idx_reg << 8)); // ADD I, V0
-
-            // Load value from [I] into V0, then copy to current_result_reg
-            emit_opcode(0xF065 | (0 << 8)); // LD V0, [I] (loads V0 from memory at I)
-
-            // Copy V0 to current_result_reg if different
-            if (current_result_reg != 0) {
-                emit_opcode(0x8000 | (current_result_reg << 8) | (0 << 4) | 0x0); // LD Vx, V0
+                VReg r = build_expr(node.value.get());
+                if (r != v) { IRInst& m = emit_ir(IROp::Move); m.dst = v; m.src1 = r; }
             }
         }
 
         void CodeGenerator::visit(ArrayAssignmentNode& node) {
-            // arr[i] = x; or arr[i][j] = x; - write value to array element
             auto it = arrays.find(node.array_name);
             if (it == arrays.end()) {
                 if (sprites.count(node.array_name)) {
@@ -1251,746 +787,287 @@
                 errorHandler.error("Undefined array: " + node.array_name, node.line, node.column);
                 return;
             }
-            uint16_t base_addr = it->second;
-            auto& dims = array_dims[node.array_name];
+            VReg val = build_expr(node.value.get());
+            VReg idx = build_index(node.indices, array_dims[node.array_name]);
+            IRInst& s = emit_ir(IROp::StoreIdx);
+            s.src1 = val; s.src2 = idx; s.imm = it->second;
+        }
 
-            // Evaluate value into V0
-            uint8_t val_reg = 0; // Use V0 for value
-            uint8_t saved = current_result_reg;
-            current_result_reg = val_reg;
-            node.value->accept(*this);
-            current_result_reg = saved;
-
-            // Save V0 to a temp register while computing index
-            uint8_t saved_val_reg = allocate_register();
-            emit_opcode(0x8000 | (saved_val_reg << 8) | (val_reg << 4) | 0x0); // LD saved_val, V0
-
-            // Compute linear index from multi-dimensional indices into idx_reg
-            uint8_t idx_reg = allocate_register();
-
-            if (node.indices.size() == 1) {
-                // Simple 1D access
-                saved = current_result_reg;
-                current_result_reg = idx_reg;
-                node.indices[0]->accept(*this);
-                current_result_reg = saved;
+        void CodeGenerator::visit(IfNode& node) {
+            int else_label = F->new_label();
+            build_branch(node.condition.get(), else_label, false);
+            node.then_branch->accept(*this);
+            if (node.else_branch) {
+                int end_label = F->new_label();
+                { IRInst& j = emit_ir(IROp::Jump); j.imm = end_label; }
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = else_label; }
+                node.else_branch->accept(*this);
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = end_label; }
             } else {
-                // Multi-dimensional: compute linear offset
-                saved = current_result_reg;
-                current_result_reg = idx_reg;
-                node.indices[0]->accept(*this);
-                current_result_reg = saved;
-
-                for (size_t i = 1; i < node.indices.size() && i < dims.size(); i++) {
-                    // idx_reg = idx_reg * dims[i] + index[i]
-                    uint8_t mult_reg = allocate_register();
-                    emit_opcode(0x6000 | (mult_reg << 8) | (dims[i] & 0xFF)); // LD mult_reg, dims[i]
-                    
-                    uint8_t temp_reg = allocate_register();
-                    emit_opcode(0x8000 | (temp_reg << 8) | (idx_reg << 4) | 0x0); // LD temp, idx
-                    emit_opcode(0x6000 | (idx_reg << 8) | 0x00); // LD idx, 0
-                    uint16_t mult_loop = static_cast<uint16_t>(output.size());
-                    emit_opcode(0x3000 | (mult_reg << 8) | 0x00); // SE mult_reg, 0
-                    uint16_t mult_end = output.size();
-                    emit_jump(0);
-                    emit_opcode(0x8000 | (idx_reg << 8) | (temp_reg << 4) | 0x4); // ADD idx, temp
-                    emit_opcode(0x7000 | (mult_reg << 8) | 0xFF); // ADD mult_reg, -1
-                    emit_jump(mult_loop);
-                    patch_jump_at(mult_end, static_cast<uint16_t>(output.size()));
-                    free_register(mult_reg);
-                    free_register(temp_reg);
-
-                    uint8_t cur_idx_reg = allocate_register();
-                    saved = current_result_reg;
-                    current_result_reg = cur_idx_reg;
-                    node.indices[i]->accept(*this);
-                    current_result_reg = saved;
-                    emit_opcode(0x8000 | (idx_reg << 8) | (cur_idx_reg << 4) | 0x4); // ADD idx, cur_idx
-                    free_register(cur_idx_reg);
-                }
+                IRInst& lb = emit_ir(IROp::Label); lb.imm = else_label;
             }
+        }
 
-            // Restore value to V0
-            emit_opcode(0x8000 | (val_reg << 8) | (saved_val_reg << 4) | 0x0); // LD V0, saved_val
-            free_register(saved_val_reg);
+        void CodeGenerator::visit(WhileNode& node) {
+            int start = F->new_label();
+            int end = F->new_label();
+            { IRInst& lb = emit_ir(IROp::Label); lb.imm = start; }
+            build_branch(node.condition.get(), end, false);
+            loop_stack.push_back({start, end});
+            node.body->accept(*this);
+            loop_stack.pop_back();
+            { IRInst& j = emit_ir(IROp::Jump); j.imm = start; }
+            { IRInst& lb = emit_ir(IROp::Label); lb.imm = end; }
+        }
 
-            // Set I = base_addr
-            emit_opcode(0xA000 | (base_addr & 0x0FFF)); // LD I, base_addr
+        void CodeGenerator::visit(ForNode& node) {
+            if (node.init) node.init->accept(*this);
+            int start = F->new_label();
+            int increment = F->new_label();
+            int end = F->new_label();
+            { IRInst& lb = emit_ir(IROp::Label); lb.imm = start; }
+            build_branch(node.condition.get(), end, false);
+            loop_stack.push_back({increment, end});
+            node.body->accept(*this);
+            loop_stack.pop_back();
+            { IRInst& lb = emit_ir(IROp::Label); lb.imm = increment; }
+            if (node.increment) node.increment->accept(*this);
+            { IRInst& j = emit_ir(IROp::Jump); j.imm = start; }
+            { IRInst& lb = emit_ir(IROp::Label); lb.imm = end; }
+        }
 
-            // Add index to I
-            emit_opcode(0xF01E | (idx_reg << 8)); // ADD I, idx_reg
+        void CodeGenerator::visit(BreakNode& /*node*/) {
+            if (loop_stack.empty()) {
+                errorHandler.error("break outside of loop", current_stmt_line, current_stmt_col);
+                return;
+            }
+            IRInst& j = emit_ir(IROp::Jump); j.imm = loop_stack.back().break_label;
+        }
 
-            // Store V0 at [I]
-            emit_opcode(0xF055 | (0 << 8)); // LD [I], V0
-
-            free_register(idx_reg);
+        void CodeGenerator::visit(ContinueNode& /*node*/) {
+            if (loop_stack.empty()) {
+                errorHandler.error("continue outside of loop", current_stmt_line, current_stmt_col);
+                return;
+            }
+            IRInst& j = emit_ir(IROp::Jump); j.imm = loop_stack.back().continue_label;
         }
 
         void CodeGenerator::visit(ReturnNode& node) {
-            // Return value convention: VE. The caller's register restore
-            // (LD V0..Vsave_max, [I]) only reaches VE when the caller has 13+
-            // live registers, so in the common case the return value survives
-            // the restore with no memory round-trip.
+            IRInst ret{IROp::Ret};
             if (node.value) {
-                uint8_t saved = current_result_reg;
-                current_result_reg = 0xE; // Return value in VE
-                node.value->accept(*this);
-                current_result_reg = saved;
+                ret.src1 = build_expr(node.value.get());
             }
-            // RET instruction
-            emit_opcode(0x00EE);
+            IRInst& r = emit_ir(IROp::Ret);
+            r.src1 = ret.src1;
         }
 
-        void CodeGenerator::visit(FunctionCallExprNode& node) {
-            // Function call in expression context - expects return value
-            // Uses runtime call stack via VD register for recursion support
-            uint8_t caller_max = getMaxLocalVariableReg();
-            
-            // Smart caller-save: only save registers that might be clobbered
-            uint8_t save_max = caller_max;
-            auto callee_it = function_max_regs.find(node.function_name);
-            if (callee_it != function_max_regs.end()) {
-                save_max = std::min(caller_max, callee_it->second);
+        void CodeGenerator::visit(SwitchNode& node) {
+            VReg expr = build_expr(node.expr.get());
+            int end = F->new_label();
+            int default_label = F->new_label();
+            bool has_default = false;
+
+            // Dispatch: jump to each case body on match
+            std::vector<int> case_labels;
+            for (const auto& c : node.cases) {
+                if (c.is_default) { has_default = true; case_labels.push_back(default_label); continue; }
+                int lbl = F->new_label();
+                case_labels.push_back(lbl);
+                IRInst& b = emit_ir(IROp::BrEqI);
+                b.src1 = expr; b.imm2 = c.value & 0xFF; b.imm = lbl;
             }
+            { IRInst& j = emit_ir(IROp::Jump); j.imm = has_default ? default_label : end; }
 
-            // This function transitively clobbers whatever the callee does:
-            // registers above our own save range are not restored here, so
-            // they must count toward OUR recorded clobber set. Unknown
-            // (forward-declared) callees are treated as clobbering everything.
-            uint8_t callee_clobber = (callee_it != function_max_regs.end()) ? callee_it->second : 0xE;
-            if (callee_clobber > peak_register) peak_register = callee_clobber;
-            
-            if (save_max > 0) {
-                emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
-                emit_opcode(0xFD1E);                               // ADD I, VD
-                emit_opcode(0x7D11);                               // ADD VD, 17
-                emit_opcode(0xF055 | (save_max << 8));             // LD [I], Vsave_max
-            } else {
-                emit_opcode(0x7D11);                               // ADD VD, 17 (still need to advance stack)
+            // Bodies (each ends with an implicit break, matching previous behavior)
+            for (size_t i = 0; i < node.cases.size(); i++) {
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = case_labels[i]; }
+                for (const auto& stmt : node.cases[i].statements) {
+                    stmt->accept(*this);
+                }
+                IRInst& j = emit_ir(IROp::Jump); j.imm = end;
             }
+            IRInst& lb = emit_ir(IROp::Label); lb.imm = end;
+        }
 
-            // Load arguments into V1, V2, V3, etc.
-            for (size_t i = 0; i < node.arguments.size() && i < 14; i++) {
-                uint8_t arg_reg = static_cast<uint8_t>(i + 1); // V1, V2, etc.
-                if (arg_reg == 0xD) continue;  // Skip VD
-                uint8_t saved = current_result_reg;
-                current_result_reg = arg_reg;
-                node.arguments[i]->accept(*this);
-                current_result_reg = saved;
-            }
-
-            // CALL function
-            uint16_t call_at = static_cast<uint16_t>(output.size());
-            emit_opcode(0x2000); // placeholder CALL
-            fixups.push_back({call_at, node.function_name, true});
-
-            // Pop the runtime stack frame
-            emit_opcode(0x7DEF);                               // ADD VD, -17 (0xEF = -17 in 8-bit)
-
-            // The return value is in VE. When the caller's restore range
-            // (V0..Vsave_max) stops short of VE - the common case - VE simply
-            // survives the restore and no memory round-trip is needed.
-            if (save_max >= 0xE) {
-                // VE is live in the caller and will be overwritten by the
-                // restore: stash the return value in the frame's spare slot
-                emit_opcode(0x8000 | (0 << 8) | (0xE << 4) | 0x0);        // LD V0, VE
-                emit_opcode(0xA000 | ((CALLER_SAVE_BASE + 16) & 0x0FFF)); // LD I, temp_addr
-                emit_opcode(0xFD1E);                                      // ADD I, VD
-                emit_opcode(0xF055 | (0 << 8));                           // LD [I], V0
-
-                emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
-                emit_opcode(0xFD1E);                               // ADD I, VD
-                emit_opcode(0xF065 | (save_max << 8));             // LD Vsave_max, [I]
-
-                // The frame stored VD with its post-increment value, so a
-                // restore range covering VD just re-corrupted the stack
-                // pointer; re-apply the decrement
-                emit_opcode(0x7DEF);                               // ADD VD, -17
-
-                emit_opcode(0xA000 | ((CALLER_SAVE_BASE + 16) & 0x0FFF)); // LD I, temp_addr
-                emit_opcode(0xFD1E);                                      // ADD I, VD
-                emit_opcode(0xF065 | (0 << 8));                           // LD V0, [I]
-                if (current_result_reg != 0) {
-                    emit_opcode(0x8000 | (current_result_reg << 8) | (0 << 4) | 0x0); // LD Vx, V0
+        void CodeGenerator::visit(DrawNode& node) {
+            VReg x = build_expr(node.x_expr.get());
+            VReg y = build_expr(node.y_expr.get());
+            int height = node.height;
+            uint16_t addr;
+            if (!node.sprite_name.empty()) {
+                auto it = sprites.find(node.sprite_name);
+                if (it == sprites.end()) {
+                    errorHandler.error("Undefined sprite: " + node.sprite_name, node.line, node.column);
+                    return;
+                }
+                addr = 0x200 + it->second;
+                if (height == 0) {
+                    auto hit = sprite_heights.find(node.sprite_name);
+                    height = (hit != sprite_heights.end()) ? hit->second : 5;
                 }
             } else {
-                if (save_max > 0) {
-                    emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
-                    emit_opcode(0xFD1E);                               // ADD I, VD
-                    emit_opcode(0xF065 | (save_max << 8));             // LD Vsave_max, [I]
-                }
-                if (current_result_reg != 0xE) {
-                    emit_opcode(0x8000 | (current_result_reg << 8) | (0xE << 4) | 0x0); // LD Vx, VE
-                }
+                addr = static_cast<uint16_t>(node.sprite_id * 5); // built-in font
             }
+            IRInst& d = emit_ir(IROp::Draw);
+            d.src1 = x; d.src2 = y; d.imm = addr; d.imm2 = height & 0xF;
+        }
+
+        void CodeGenerator::visit(ClearNode& /*node*/) {
+            emit_ir(IROp::Cls);
+        }
+
+        void CodeGenerator::visit(WaitNode& node) {
+            // wait(ms): convert to 60Hz timer ticks (~16ms each), minimum 1
+            VReg ticks;
+            int const_ms = -1;
+            if (node.type == WaitNode::WaitType::FIXED) {
+                const_ms = node.fixed_duration;
+            } else if (auto c = try_get_constant(node.duration.get())) {
+                const_ms = *c;
+            }
+            if (const_ms >= 0) {
+                int t = (const_ms / 16) & 0xFF;
+                if (t == 0) t = 1;
+                ticks = fresh();
+                IRInst& k = emit_ir(IROp::Const); k.dst = ticks; k.imm = t;
+            } else {
+                VReg ms = build_expr(node.duration.get());
+                ticks = fresh();
+                { IRInst& m = emit_ir(IROp::Move); m.dst = ticks; m.src1 = ms; }
+                for (int i = 0; i < 4; i++) { IRInst& s = emit_ir(IROp::Shr); s.dst = ticks; }
+                int nonzero = F->new_label();
+                { IRInst& b = emit_ir(IROp::BrNeI); b.src1 = ticks; b.imm2 = 0; b.imm = nonzero; }
+                { IRInst& a = emit_ir(IROp::AddI); a.dst = ticks; a.imm = 1; }
+                { IRInst& lb = emit_ir(IROp::Label); lb.imm = nonzero; }
+            }
+            IRInst& w = emit_ir(IROp::WaitTicks); w.src1 = ticks;
+        }
+
+        void CodeGenerator::visit(BeepNode& node) {
+            VReg d = build_expr(node.duration.get());
+            IRInst& b = emit_ir(IROp::Beep); b.src1 = d;
+        }
+
+        void CodeGenerator::visit(DrawNumNode& node) {
+            VReg v = build_expr(node.value.get());
+            VReg x = build_expr(node.x_expr.get());
+            VReg y = build_expr(node.y_expr.get());
+            IRInst& d = emit_ir(IROp::DrawNum);
+            d.src1 = v; d.src2 = x; d.src3 = y;
+        }
+
+        void CodeGenerator::visit(InlineAsmNode& node) {
+            F->raw_pool.push_back(node.opcodes);
+            IRInst& r = emit_ir(IROp::Raw);
+            r.imm = static_cast<int>(F->raw_pool.size() - 1);
         }
 
         void CodeGenerator::visit(FunctionCallNode& node) {
-            // Function call in statement context - no return value expected
-            // Uses runtime call stack via VD register for recursion support
-            uint8_t caller_max = getMaxLocalVariableReg();
-            
-            // Smart caller-save: only save registers that might be clobbered
-            uint8_t save_max = caller_max;
-            auto callee_it = function_max_regs.find(node.function_name);
-            if (callee_it != function_max_regs.end()) {
-                save_max = std::min(caller_max, callee_it->second);
+            std::vector<VReg> args;
+            for (const auto& arg : node.arguments) {
+                args.push_back(build_expr(arg.get()));
             }
+            IRInst& c = emit_ir(IROp::Call);
+            c.name = node.function_name;
+            c.args = std::move(args);
+        }
 
-            // This function transitively clobbers whatever the callee does:
-            // registers above our own save range are not restored here, so
-            // they must count toward OUR recorded clobber set. Unknown
-            // (forward-declared) callees are treated as clobbering everything.
-            uint8_t callee_clobber = (callee_it != function_max_regs.end()) ? callee_it->second : 0xE;
-            if (callee_clobber > peak_register) peak_register = callee_clobber;
+        void CodeGenerator::visit(ArrayDeclNode& node) {
+            if (arrays.count(node.name)) {
+                errorHandler.error("Array '" + node.name + "' already declared", node.line, node.column);
+                return;
+            }
+            arrays[node.name] = next_array_addr;
+            array_sizes[node.name] = node.size;
+            array_dims[node.name] = node.dimensions;
+            next_array_addr += static_cast<uint16_t>(node.size);
 
-            // Save local variable registers using runtime stack offset (VD)
-            if (save_max > 0) {
-                emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
-                emit_opcode(0xFD1E);                               // ADD I, VD
-                emit_opcode(0x7D11);                               // ADD VD, 17
-                emit_opcode(0xF055 | (save_max << 8));             // LD [I], Vsave_max
+            if (next_array_addr > CALLER_SAVE_BASE - 0x10) {
+                errorHandler.error("Array allocation exceeds available memory (approaching stack area at 0x" +
+                                   std::to_string(CALLER_SAVE_BASE) + ")", node.line, node.column);
+            } else if (next_array_addr > CALLER_SAVE_BASE - 0x100) {
+                errorHandler.warning("Memory usage high: arrays using " +
+                                     std::to_string(next_array_addr - 0x800) + " bytes, " +
+                                     std::to_string(CALLER_SAVE_BASE - next_array_addr) + " bytes remaining",
+                                     node.line, node.column);
+            }
+        }
+
+        void CodeGenerator::visit(EntityDeclNode& node) {
+            auto type_it = entity_types.find(node.type_name);
+            if (type_it == entity_types.end()) {
+                errorHandler.error("Unknown entity type: " + node.type_name, node.line, node.column);
+                return;
+            }
+            int entity_size = type_it->second.size;
+            int total_size = (node.array_size > 0) ? entity_size * node.array_size : entity_size;
+
+            EntityInstance instance;
+            instance.type_name = node.type_name;
+            instance.base_addr = next_array_addr;
+            instance.array_size = node.array_size;
+            entity_instances[node.var_name] = instance;
+            next_array_addr += static_cast<uint16_t>(total_size);
+
+            if (next_array_addr > 0xFFF) {
+                errorHandler.error("Entity allocation exceeds available memory", node.line, node.column);
+            }
+        }
+
+        void CodeGenerator::visit(EntityFieldAssignNode& node) {
+            auto inst_it = entity_instances.find(node.entity_name);
+            if (inst_it == entity_instances.end()) {
+                errorHandler.error("Unknown entity variable: " + node.entity_name, node.line, node.column);
+                return;
+            }
+            auto type_it = entity_types.find(inst_it->second.type_name);
+            int field_offset = -1;
+            if (type_it != entity_types.end()) {
+                for (const auto& field : type_it->second.fields) {
+                    if (field.name == node.field_name) { field_offset = field.offset; break; }
+                }
+            }
+            if (field_offset < 0) {
+                errorHandler.error("Unknown field '" + node.field_name + "' in entity '" +
+                                   inst_it->second.type_name + "'", node.line, node.column);
+                return;
+            }
+            int esize = type_it->second.size;
+
+            VReg val = build_expr(node.value.get());
+            VReg idx;
+            if (node.index) {
+                VReg iv = build_expr(node.index.get());
+                idx = mult_by_const(iv, esize);
+                if (field_offset > 0) {
+                    VReg acc = fresh();
+                    { IRInst& m = emit_ir(IROp::Move); m.dst = acc; m.src1 = idx; }
+                    { IRInst& a = emit_ir(IROp::AddI); a.dst = acc; a.imm = field_offset & 0xFF; }
+                    idx = acc;
+                }
             } else {
-                emit_opcode(0x7D11);                               // ADD VD, 17
+                idx = fresh();
+                IRInst& k = emit_ir(IROp::Const); k.dst = idx; k.imm = field_offset & 0xFF;
             }
-
-            // Load arguments into V1, V2, V3, etc.
-            for (size_t i = 0; i < node.arguments.size() && i < 14; i++) {
-                uint8_t arg_reg = static_cast<uint8_t>(i + 1); // V1, V2, etc.
-                if (arg_reg == 0xD) continue;  // Skip VD
-                uint8_t saved = current_result_reg;
-                current_result_reg = arg_reg;
-                node.arguments[i]->accept(*this);
-                current_result_reg = saved;
-            }
-
-            // CALL function
-            uint16_t call_at = static_cast<uint16_t>(output.size());
-            emit_opcode(0x2000); // placeholder CALL
-            fixups.push_back({call_at, node.function_name, true});
-
-            // Restore: ADD VD, -17; LD I, CALLER_SAVE_BASE; ADD I, VD; LD Vmax, [I]
-            emit_opcode(0x7DEF);                               // ADD VD, -17
-
-            if (save_max > 0) {
-                emit_opcode(0xA000 | (CALLER_SAVE_BASE & 0x0FFF)); // LD I, CALLER_SAVE_BASE
-                emit_opcode(0xFD1E);                               // ADD I, VD
-                emit_opcode(0xF065 | (save_max << 8));             // LD Vsave_max, [I]
-                if (save_max >= 0xD) {
-                    // Restore range covered VD (saved post-increment):
-                    // re-apply the decrement to fix the stack pointer
-                    emit_opcode(0x7DEF);                           // ADD VD, -17
-                }
-            }
+            IRInst& s = emit_ir(IROp::StoreIdx);
+            s.src1 = val; s.src2 = idx; s.imm = inst_it->second.base_addr;
         }
 
-        // CHIP-8 memory limits
-        static constexpr size_t MAX_ROM_SIZE = 0xDFF - 0x200 + 1;  // 3072 bytes (0x200-0xDFF)
-        static constexpr size_t ROM_WARNING_THRESHOLD = MAX_ROM_SIZE * 90 / 100;  // Warn at 90%
-        bool rom_size_warning_issued = false;
-
-        void CodeGenerator::emit_byte(uint8_t byte) {
-            output.push_back(byte);
-            
-            // Check ROM size limits
-            if (output.size() > MAX_ROM_SIZE) {
-                errorHandler.error("ROM size exceeds CHIP-8 limit of 3072 bytes (" + 
-                                   std::to_string(output.size()) + " bytes)", 0, 0);
-            } else if (!rom_size_warning_issued && output.size() > ROM_WARNING_THRESHOLD) {
-                errorHandler.warning("ROM size is at " + std::to_string(output.size() * 100 / MAX_ROM_SIZE) + 
-                                    "% capacity (" + std::to_string(output.size()) + "/" + 
-                                    std::to_string(MAX_ROM_SIZE) + " bytes)", 0, 0);
-                rom_size_warning_issued = true;
-            }
-        }
-
-        void CodeGenerator::emit_opcode(uint16_t opcode) {
-            emit_byte(static_cast<uint8_t>((opcode >> 8) & 0xFF));
-            emit_byte(static_cast<uint8_t>(opcode & 0xFF));
-        }
-
-        void CodeGenerator::emit_jump(uint16_t addr_offset_bytes) {
-            // JP absolute address (0x200 + byte offset)
-            uint16_t target_addr = static_cast<uint16_t>(0x200 + (addr_offset_bytes & 0x0FFF));
-            emit_opcode(0x1000 | (target_addr & 0x0FFF));
-        }
-
-        void CodeGenerator::patch_jump_at(uint16_t at_offset_bytes, uint16_t target_offset_bytes) {
-            uint16_t target_addr = static_cast<uint16_t>(0x200 + (target_offset_bytes & 0x0FFF));
-            uint16_t opcode = 0x1000 | (target_addr & 0x0FFF);
-            output[at_offset_bytes]     = static_cast<uint8_t>((opcode >> 8) & 0xFF);
-            output[at_offset_bytes + 1] = static_cast<uint8_t>(opcode & 0xFF);
-        }
-
-        uint8_t CodeGenerator::allocate_register() {
-            // Count currently used registers for pressure warning
-            int used_count = 0;
-            for (uint8_t i = 1; i < 15; i++) {
-                if (i != 0xD && used_registers[i]) used_count++;
-            }
-            
-            for (uint8_t i = 1; i < 15; i++) { // Skip V0 and VF
-                if (i == 0xD) continue;  // Skip VD - reserved for runtime call stack
-                if (!used_registers[i]) {
-                    used_registers[i] = true;
-                    if (i > peak_register) peak_register = i;
-                    
-                    // Warn when approaching register limit (13 usable: V1-VC, VE)
-                    if (used_count >= 11) {  // 11+ of 13 = 85%+ usage
-                        errorHandler.warning("High register pressure: " + std::to_string(used_count + 1) + 
-                                           "/13 registers in use. Consider using globals or simplifying expressions.", 0, 0);
-                    }
-                    return i;
-                }
-            }
-            // Build a diagnostic showing which registers are variables vs temps
-            std::string vars_desc;
-            for (const auto& [name, var] : variables) {
-                if (!vars_desc.empty()) vars_desc += ", ";
-                vars_desc += name;
-            }
-            errorHandler.error("Out of registers (13 available per function; all in use by locals/temporaries). "
-                               "Locals: [" + vars_desc + "]. "
-                               "Use 'global' for additional storage or simplify nested expressions.",
-                               current_stmt_line, current_stmt_col);
-            return 0; // Default to V0, but ideally this should never happen
-        }
-
-        void CodeGenerator::free_register(uint8_t reg) {
-            if (reg > 0 && reg < 15) {
-                used_registers[reg] = false;
-            }
-        }
-
-        uint8_t CodeGenerator::get_variable_register(const std::string& name) {
-            auto it = variables.find(name);
-            if (it == variables.end()) {
-                errorHandler.error("Undefined variable: " + name, current_stmt_line, current_stmt_col);
-                return 0; // Default to V0, but should not happen
-            }
-            return it->second.reg;
-        }
-
-        uint8_t CodeGenerator::getMaxLocalVariableReg() {
-            // Return the highest register that is currently in use
-            // This includes both local variables AND temp registers from expression evaluation
-            uint8_t max_reg = 0;
-            for (uint8_t i = 1; i < 15; i++) {
-                if (used_registers[i]) {
-                    max_reg = i;
-                }
-            }
-            return max_reg;
-        }
-
-        void CodeGenerator::emit_comparison_node(uint8_t dest_reg, uint8_t left_reg, uint8_t right_reg, TokenType op) {
-            // Ensure dest_reg will contain 0 (false) or 1 (true)
-            switch (op) {
-                case TokenType::EQUALS:
-                    // EQUALS: result = 1 if left == right, 0 otherwise
-                    // Uses the native register-compare skip; does not clobber operands
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x00);            // LD dest, 0
-                    emit_opcode(0x9000 | (left_reg << 8) | (right_reg << 4)); // SNE left, right -> skip if !=
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x01);            // LD dest, 1 (equal case)
-                    break;
-                case TokenType::NOT_EQUALS:
-                    // NOT_EQUALS: result = 1 if left != right, 0 otherwise
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x00);            // LD dest, 0
-                    emit_opcode(0x5000 | (left_reg << 8) | (right_reg << 4)); // SE left, right -> skip if ==
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x01);            // LD dest, 1 (not equal case)
-                    break;
-                case TokenType::LESS_THAN:
-                    // dest = left; SUB dest, right; VF=0 if borrow (left<right);
-                    emit_opcode(0x8000 | (dest_reg << 8) | (left_reg << 4) | 0x0); // LD dest, left
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x5); // SUB dest, right
-                    // VF==0 => true; move VF (0/1) into dest as 1/0 via: dest = 1 - VF
-                    // Load dest=1, then SUB dest, VF
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x01); // LD dest, 1
-                    emit_opcode(0x8000 | (dest_reg << 8) | (0xF << 4) | 0x5); // SUB dest, VF
-                    break;
-                case TokenType::GREATER_THAN:
-                    // dest = right; SUB dest, left; VF=0 if borrow (right<left) => left>right is true when VF==0
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x0); // LD dest, right
-                    emit_opcode(0x8000 | (dest_reg << 8) | (left_reg << 4) | 0x5);  // SUB dest, left
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x01); // LD dest, 1
-                    emit_opcode(0x8000 | (dest_reg << 8) | (0xF << 4) | 0x5); // SUB dest, VF (1-VF)
-                    break;
-                case TokenType::LESS_EQUAL:
-                    // left <= right is !(left > right), i.e., NOT(right < left)
-                    // right < left means VF=0 after right - left
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x0); // LD dest, right
-                    emit_opcode(0x8000 | (dest_reg << 8) | (left_reg << 4) | 0x5);  // SUB dest, left
-                    // VF=1 means no borrow (right >= left), so left <= right is true when VF=1
-                    emit_opcode(0x8000 | (dest_reg << 8) | (0xF << 4) | 0x0); // LD dest, VF
-                    break;
-                case TokenType::GREATER_EQUAL:
-                    // left >= right means VF=1 after left - right (no borrow)
-                    emit_opcode(0x8000 | (dest_reg << 8) | (left_reg << 4) | 0x0); // LD dest, left
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x5); // SUB dest, right
-                    // VF=1 means no borrow (left >= right)
-                    emit_opcode(0x8000 | (dest_reg << 8) | (0xF << 4) | 0x0); // LD dest, VF
-                    break;
-                default:
-                    errorHandler.error("Invalid comparison operator", 0, 0);
-                    break;
-            }
-        }
-
-        void CodeGenerator::process_binary_operation(uint8_t dest_reg, uint8_t left_reg, uint8_t right_reg, TokenType op) {
-            // First, copy the left operand to the destination register
-            if (dest_reg != left_reg) {
-                emit_opcode(0x8000 | (dest_reg << 8) | (left_reg << 4) | 0x0); // LD Vx, Vy
-            }
-
-            // Then perform the operation
-            switch (op) {
-                case TokenType::PLUS:
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x4); // ADD Vx, Vy
-                    break;
-
-                case TokenType::MINUS:
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x5); // SUB Vx, Vy
-                    break;
-
-                case TokenType::MULTIPLY:
-                {
-                    uint8_t temp_reg = allocate_register();
-                    uint8_t counter_reg = allocate_register();
-
-                    // Copy operands out FIRST: dest may alias the left operand
-                    emit_opcode(0x8000 | (counter_reg << 8) | (right_reg << 4) | 0x0); // LD counter, right
-                    emit_opcode(0x8000 | (temp_reg << 8) | (left_reg << 4) | 0x0);     // LD temp, left
-
-                    // Initialize result to 0
-                    emit_opcode(0x6000 | (dest_reg << 8) | 0x00); // LD Vx, 0
-
-                    // Start of loop
-                    uint16_t loop_start = static_cast<uint16_t>(output.size());
-
-                    // if counter != 0 -> skip the jump to end (continue looping)
-                    emit_opcode(0x4000 | (counter_reg << 8) | 0x00); // SNE Vcounter, 0
-                    uint16_t jump_to_end_at = output.size();
-                    emit_jump(0); // placeholder - exit if counter == 0
-
-                    // Add temp to result
-                    emit_opcode(0x8000 | (dest_reg << 8) | (temp_reg << 4) | 0x4); // ADD Vx, Vy
-
-                    // Decrement counter
-                    emit_opcode(0x7000 | (counter_reg << 8) | 0xFF); // ADD Vx, -1
-
-                    // Jump back to start
-                    emit_jump(loop_start);
-
-                    // Patch end target
-                    patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
-
-                    // Free temporary registers
-                    free_register(temp_reg);
-                    free_register(counter_reg);
-                }
-                    break;
-
-                case TokenType::DIVIDE:
-                {
-                    uint8_t temp_reg = allocate_register();
-                    uint8_t counter_reg = allocate_register();
-
-                    // Initialize result (counter) to 0
-                    emit_opcode(0x6000 | (counter_reg << 8) | 0x00); // LD Vcounter, 0
-
-                    // Copy left operand to temp (dividend)
-                    emit_opcode(0x8000 | (temp_reg << 8) | (left_reg << 4) | 0x0); // LD temp, left
-
-                    // Start of loop
-                    uint16_t loop_start = static_cast<uint16_t>(output.size());
-
-                    // If temp >= right -> skip the jump, continue dividing
-                    // SUB temp, right sets VF=1 if no borrow (temp >= right)
-                    emit_opcode(0x8000 | (0xF << 8) | (temp_reg << 4) | 0x0); // LD VF, temp
-                    emit_opcode(0x8000 | (0xF << 8) | (right_reg << 4) | 0x5); // SUB VF, right (VF=1 if temp>=right)
-                    emit_opcode(0x4000 | (0xF << 8) | 0x00);                  // SNE VF, 0 -> skip next if temp>=right
-                    uint16_t jump_to_end_at = output.size();
-                    emit_jump(0); // placeholder - exit if temp < right
-
-                    // temp -= right
-                    emit_opcode(0x8000 | (temp_reg << 8) | (right_reg << 4) | 0x5); // SUB temp, right
-
-                    // counter++
-                    emit_opcode(0x7000 | (counter_reg << 8) | 0x01); // ADD counter, 1
-
-                    // loop
-                    emit_jump(loop_start);
-
-                    // Patch end target - jump here when temp < right
-                    patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
-
-                    // Copy result to destination
-                    emit_opcode(0x8000 | (dest_reg << 8) | (counter_reg << 4) | 0x0); // LD dest, counter
-
-                    // Free temporary registers
-                    free_register(temp_reg);
-                    free_register(counter_reg);
-                }
-                    break;
-
-                case TokenType::AMPERSAND: // Bitwise AND
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x2); // AND Vx, Vy
-                    break;
-
-                case TokenType::PIPE: // Bitwise OR
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x1); // OR Vx, Vy
-                    break;
-
-                case TokenType::CARET: // Bitwise XOR
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x3); // XOR Vx, Vy
-                    break;
-
-                case TokenType::MODULO:
-                {
-                    // dest = dest % right via repeated subtraction.
-                    // Note: right == 0 at runtime hangs (same as divide).
-                    uint16_t loop_start = static_cast<uint16_t>(output.size());
-                    emit_opcode(0x8000 | (0xF << 8) | (dest_reg << 4) | 0x0);  // LD VF, dest
-                    emit_opcode(0x8000 | (0xF << 8) | (right_reg << 4) | 0x5); // SUB VF, right (VF=1 if dest>=right)
-                    emit_opcode(0x4000 | (0xF << 8) | 0x00);                   // SNE VF, 0 -> skip if dest>=right
-                    uint16_t jump_to_end_at = static_cast<uint16_t>(output.size());
-                    emit_jump(0); // exit when dest < right
-                    emit_opcode(0x8000 | (dest_reg << 8) | (right_reg << 4) | 0x5); // SUB dest, right
-                    emit_jump(loop_start);
-                    patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
-                }
-                    break;
-
-                case TokenType::SHIFT_LEFT:
-                case TokenType::SHIFT_RIGHT:
-                {
-                    // Variable shift count: loop shifting dest once per count
-                    uint8_t counter_reg = allocate_register();
-                    emit_opcode(0x8000 | (counter_reg << 8) | (right_reg << 4) | 0x0); // LD counter, right
-                    uint16_t loop_start = static_cast<uint16_t>(output.size());
-                    emit_opcode(0x4000 | (counter_reg << 8) | 0x00); // SNE counter, 0 -> skip if counter != 0
-                    uint16_t jump_to_end_at = static_cast<uint16_t>(output.size());
-                    emit_jump(0);
-                    uint8_t shift_op = (op == TokenType::SHIFT_LEFT) ? 0xE : 0x6;
-                    emit_opcode(0x8000 | (dest_reg << 8) | (dest_reg << 4) | shift_op); // shift dest in place
-                    emit_opcode(0x7000 | (counter_reg << 8) | 0xFF); // ADD counter, -1
-                    emit_jump(loop_start);
-                    patch_jump_at(jump_to_end_at, static_cast<uint16_t>(output.size()));
-                    free_register(counter_reg);
-                }
-                    break;
-
-                default:
-                    errorHandler.error("Invalid binary operator", 0, 0);
-                    break;
-            }
-        }
-
+        // Declarations handled in the program pass; harmless if revisited
         void CodeGenerator::visit(ConstDeclNode& node) {
-            // Store constant value for later use in expressions
             constants[node.name] = node.value;
         }
 
         void CodeGenerator::visit(EnumDeclNode& node) {
-            // Store each enum value as a constant
-            // Format: EnumName.ValueName or just ValueName
             for (const auto& ev : node.values) {
-                // Store as EnumName.ValueName
                 constants[node.name + "." + ev.name] = ev.value;
-                // Also store just ValueName for convenience (if no collision)
-                if (constants.find(ev.name) == constants.end()) {
+                if (!constants.count(ev.name)) {
                     constants[ev.name] = ev.value;
                 }
             }
         }
 
-        void CodeGenerator::visit(InlineAsmNode& node) {
-            // Emit raw opcodes directly
-            for (uint16_t opcode : node.opcodes) {
-                emit_opcode(opcode);
-            }
-        }
-
-        void CodeGenerator::visit(GlobalVarDeclNode& node) {
-            // Global variables are stored in memory (like arrays)
-            // Allocate memory address for the variable
-            if (arrays.find(node.name) != arrays.end()) {
-                errorHandler.error("Global variable '" + node.name + "' already declared", node.line, node.column);
-                return;
-            }
-            
-            arrays[node.name] = next_array_addr;
-            array_sizes[node.name] = 1;  // Single byte
-            next_array_addr += 1;
-            
-            // If there's an initializer, emit code to store the value
-            if (node.initializer) {
-                // Evaluate initializer into V0
-                uint8_t saved = current_result_reg;
-                current_result_reg = 0;
-                node.initializer->accept(*this);
-                current_result_reg = saved;
-                
-                // Store V0 at the global variable's address
-                emit_opcode(0xA000 | (arrays[node.name] & 0x0FFF)); // LD I, addr
-                emit_opcode(0xF055 | (0 << 8)); // LD [I], V0
-            }
-        }
-
-        void CodeGenerator::visit(LogicalExprNode& node) {
-            // Short-circuit evaluation for && and ||
-            // Result is 0 (false) or 1 (true) in current_result_reg
-            
-            // Evaluate left side
-            uint8_t left_reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = left_reg;
-            node.left->accept(*this);
-            current_result_reg = saved;
-
-            if (node.op == TokenType::AND_AND) {
-                // AND: if left is 0, result is 0 (skip right)
-                // If left != 0, skip the short-circuit
-                emit_opcode(0x4000 | (left_reg << 8) | 0x00); // SNE left, 0 -> skip next if left != 0
-                uint16_t short_circuit_at = output.size();
-                emit_jump(0); // placeholder - jump to set result=0 if left == 0
-
-                // Evaluate right side (left was true)
-                uint8_t right_reg = allocate_register();
-                saved = current_result_reg;
-                current_result_reg = right_reg;
-                node.right->accept(*this);
-                current_result_reg = saved;
-
-                // Result is right's truthiness: 1 if right != 0, else 0
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x00); // LD result, 0
-                emit_opcode(0x3000 | (right_reg << 8) | 0x00); // SE right, 0 -> skip next if right == 0
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x01); // LD result, 1
-                
-                uint16_t end_at = output.size();
-                emit_jump(0); // jump to end
-
-                // Short-circuit path: result = 0
-                patch_jump_at(short_circuit_at, static_cast<uint16_t>(output.size()));
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x00); // LD result, 0
-
-                // End
-                patch_jump_at(end_at, static_cast<uint16_t>(output.size()));
-
-                free_register(right_reg);
-            } else { // OR_OR
-                // OR: if left is non-zero, result is 1 (skip right)
-                // If left == 0, skip the short-circuit
-                emit_opcode(0x3000 | (left_reg << 8) | 0x00); // SE left, 0 -> skip next if left == 0
-                uint16_t short_circuit_at = output.size();
-                emit_jump(0); // placeholder - jump to set result=1 if left != 0
-
-                // Evaluate right side (left was false)
-                uint8_t right_reg = allocate_register();
-                saved = current_result_reg;
-                current_result_reg = right_reg;
-                node.right->accept(*this);
-                current_result_reg = saved;
-
-                // Result is right's truthiness: 1 if right != 0, else 0
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x00); // LD result, 0
-                emit_opcode(0x3000 | (right_reg << 8) | 0x00); // SE right, 0 -> skip next if right == 0
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x01); // LD result, 1
-                
-                uint16_t end_at = output.size();
-                emit_jump(0); // jump to end
-
-                // Short-circuit path: result = 1
-                patch_jump_at(short_circuit_at, static_cast<uint16_t>(output.size()));
-                emit_opcode(0x6000 | (current_result_reg << 8) | 0x01); // LD result, 1
-
-                // End
-                patch_jump_at(end_at, static_cast<uint16_t>(output.size()));
-
-                free_register(right_reg);
-            }
-
-            free_register(left_reg);
-        }
-
-        void CodeGenerator::visit(SwitchNode& node) {
-            // Evaluate switch expression into a register
-            uint8_t expr_reg = allocate_register();
-            uint8_t saved = current_result_reg;
-            current_result_reg = expr_reg;
-            node.expr->accept(*this);
-            current_result_reg = saved;
-
-            std::vector<uint16_t> case_body_addrs;  // Addresses of case bodies
-            std::vector<uint16_t> jump_to_case_addrs; // Addresses of jumps to case bodies
-            std::vector<uint16_t> end_jumps; // Jumps to end after each case body
-            uint16_t default_addr = 0;
-            bool has_default = false;
-
-            // First pass: emit comparison jumps for each case
-            for (size_t i = 0; i < node.cases.size(); i++) {
-                const auto& c = node.cases[i];
-                if (c.is_default) {
-                    has_default = true;
-                    // Default is handled after all cases
-                    continue;
-                }
-                
-                // Compare expr_reg with case value
-                // SNE expr, value -> skip next if NOT equal (so we jump when equal)
-                emit_opcode(0x4000 | (expr_reg << 8) | (c.value & 0xFF)); // SNE expr, value
-                // If not equal, skip the jump; if equal, take the jump to case body
-                uint16_t jump_at = output.size();
-                emit_jump(0); // placeholder - jump to case body if equal
-                jump_to_case_addrs.push_back(jump_at);
-            }
-
-            // Jump to default or end if no case matched
-            uint16_t default_or_end_jump = output.size();
-            emit_jump(0); // placeholder
-
-            // Second pass: emit case bodies
-            size_t jump_idx = 0;
-            for (size_t i = 0; i < node.cases.size(); i++) {
-                const auto& c = node.cases[i];
-                
-                if (c.is_default) {
-                    default_addr = static_cast<uint16_t>(output.size());
-                } else {
-                    // Patch the jump to this case body
-                    patch_jump_at(jump_to_case_addrs[jump_idx], static_cast<uint16_t>(output.size()));
-                    jump_idx++;
-                }
-                
-                // Emit case body
-                for (const auto& stmt : c.statements) {
-                    stmt->accept(*this);
-                }
-                
-                // Jump to end (implicit break)
-                uint16_t end_jump = output.size();
-                emit_jump(0);
-                end_jumps.push_back(end_jump);
-            }
-
-            // Patch default/end jump
-            if (has_default) {
-                patch_jump_at(default_or_end_jump, default_addr);
-            } else {
-                patch_jump_at(default_or_end_jump, static_cast<uint16_t>(output.size()));
-            }
-
-            // Patch all end jumps
-            uint16_t end_addr = static_cast<uint16_t>(output.size());
-            for (uint16_t addr : end_jumps) {
-                patch_jump_at(addr, end_addr);
-            }
-
-            free_register(expr_reg);
-        }
-
         void CodeGenerator::visit(EntityDefNode& node) {
-            // Register the entity type
             EntityType type;
             for (const auto& field : node.fields) {
                 type.fields.push_back(field);
@@ -1999,216 +1076,276 @@
             entity_types[node.name] = type;
         }
 
-        void CodeGenerator::visit(EntityDeclNode& node) {
-            // Look up the entity type
-            auto type_it = entity_types.find(node.type_name);
-            if (type_it == entity_types.end()) {
-                errorHandler.error("Unknown entity type: " + node.type_name, node.line, node.column);
-                return;
+        void CodeGenerator::visit(GlobalVarDeclNode& node) {
+            if (arrays.count(node.name)) return; // registered in the program pass
+            arrays[node.name] = next_array_addr;
+            array_sizes[node.name] = 1;
+            next_array_addr += 1;
+        }
+
+        void CodeGenerator::visit(SpriteDefNode& /*node*/) {
+            // Sprite/table data is hoisted into the data section during the
+            // program pass; nothing to do at statement position.
+        }
+
+        // Expression visitor methods (satisfy the interface; the builder
+        // dispatches directly, but route through build_expr for safety)
+        void CodeGenerator::visit(BinaryExprNode& node) { expr_result = build_binary(node, NO_VREG); }
+        void CodeGenerator::visit(VariableExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(NumberExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(StringExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(ConditionNode& node) { expr_result = build_condition_value(node); }
+        void CodeGenerator::visit(LogicalExprNode& node) { expr_result = build_logical_value(node); }
+        void CodeGenerator::visit(UnaryExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(KeyExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(WaitKeyExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(RandExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(CollisionExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(TimerExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(ArrayAccessExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(FunctionCallExprNode& node) { expr_result = build_expr(&node); }
+        void CodeGenerator::visit(EntityFieldAccessExpr& node) { expr_result = build_expr(&node); }
+
+        // ------------------------------------------------------------------
+        // Function and program assembly
+        // ------------------------------------------------------------------
+
+        void CodeGenerator::build_function_ir(FunctionNode& node) {
+            var_vregs.clear();
+            loop_stack.clear();
+
+            // Parameters occupy the first vreg ids (EnterFunc defines them)
+            for (size_t i = 0; i < node.params.size() && i < 12; i++) {
+                VReg v = fresh(); // ids 0..n-1 in an empty function
+                var_vregs[node.params[i].name] = v;
+            }
+            IRInst& enter = emit_ir(IROp::EnterFunc);
+            enter.imm = static_cast<int>(node.params.size());
+
+            // main runs global initializers first
+            if (node.name == "main") {
+                for (GlobalVarDeclNode* g : global_inits) {
+                    current_stmt_line = g->line;
+                    current_stmt_col = g->column;
+                    VReg r = build_expr(g->initializer.get());
+                    IRInst& s = emit_ir(IROp::StoreG);
+                    s.src1 = r; s.imm = arrays[g->name];
+                }
             }
 
-            // Calculate total size
-            int entity_size = type_it->second.size;
-            int total_size = (node.array_size > 0) ? entity_size * node.array_size : entity_size;
+            node.body->accept(*this);
 
-            // Allocate memory for the entity
-            EntityInstance instance;
-            instance.type_name = node.type_name;
-            instance.base_addr = next_array_addr;
-            instance.array_size = node.array_size;
-
-            entity_instances[node.var_name] = instance;
-            next_array_addr += static_cast<uint16_t>(total_size);
-
-            // Check for memory overflow
-            if (next_array_addr > 0xFFF) {
-                errorHandler.error("Entity allocation exceeds available memory", node.line, node.column);
+            // Implicit return if the body doesn't end with one
+            if (F->insts.empty() || F->insts.back().op != IROp::Ret) {
+                emit_ir(IROp::Ret);
             }
         }
 
-        void CodeGenerator::visit(EntityFieldAccessExpr& node) {
-            // Look up the entity instance
-            auto inst_it = entity_instances.find(node.entity_name);
-            if (inst_it == entity_instances.end()) {
-                errorHandler.error("Unknown entity variable: " + node.entity_name, node.line, node.column);
-                return;
-            }
-
-            // Look up the entity type
-            auto type_it = entity_types.find(inst_it->second.type_name);
-            if (type_it == entity_types.end()) {
-                errorHandler.error("Unknown entity type: " + inst_it->second.type_name, node.line, node.column);
-                return;
-            }
-
-            // Find the field offset
-            int field_offset = -1;
-            for (const auto& field : type_it->second.fields) {
-                if (field.name == node.field_name) {
-                    field_offset = field.offset;
-                    break;
-                }
-            }
-            if (field_offset < 0) {
-                errorHandler.error("Unknown field '" + node.field_name + "' in entity '" + inst_it->second.type_name + "'", node.line, node.column);
-                return;
-            }
-
-            uint16_t base_addr = inst_it->second.base_addr;
-            int entity_size = type_it->second.size;
-
-            // Compute address: base + (index * entity_size) + field_offset
-            uint8_t idx_reg = allocate_register();
-
-            if (node.index) {
-                // Array access: entity[i].field
-                uint8_t saved = current_result_reg;
-                current_result_reg = idx_reg;
-                node.index->accept(*this);
-                current_result_reg = saved;
-
-                // Multiply by entity size if > 1
-                if (entity_size > 1) {
-                    uint8_t size_reg = allocate_register();
-                    emit_opcode(0x6000 | (size_reg << 8) | (entity_size & 0xFF)); // LD size_reg, entity_size
-
-                    // Multiply idx_reg by size_reg using repeated addition
-                    uint8_t temp_reg = allocate_register();
-                    emit_opcode(0x8000 | (temp_reg << 8) | (idx_reg << 4) | 0x0); // LD temp, idx
-                    emit_opcode(0x6000 | (idx_reg << 8) | 0x00); // LD idx, 0
-                    uint16_t mult_loop = static_cast<uint16_t>(output.size());
-                    emit_opcode(0x4000 | (size_reg << 8) | 0x00); // SNE size_reg, 0 - skip JP if size != 0
-                    uint16_t mult_end = output.size();
-                    emit_jump(0); // placeholder - exit when size == 0
-                    emit_opcode(0x8000 | (idx_reg << 8) | (temp_reg << 4) | 0x4); // ADD idx, temp
-                    emit_opcode(0x7000 | (size_reg << 8) | 0xFF); // ADD size_reg, -1
-                    emit_jump(mult_loop);
-                    patch_jump_at(mult_end, static_cast<uint16_t>(output.size()));
-                    free_register(temp_reg);
-                    free_register(size_reg);
-                }
-
-                // Add field offset
-                if (field_offset > 0) {
-                    emit_opcode(0x7000 | (idx_reg << 8) | (field_offset & 0xFF)); // ADD idx_reg, field_offset
-                }
-            } else {
-                // Single entity: just use field offset
-                emit_opcode(0x6000 | (idx_reg << 8) | (field_offset & 0xFF)); // LD idx_reg, field_offset
-            }
-
-            // Load I = base_addr
-            emit_opcode(0xA000 | (base_addr & 0x0FFF)); // LD I, base_addr
-
-            // Add index to I
-            emit_opcode(0xF01E | (idx_reg << 8)); // ADD I, idx_reg
-
-            // Load value from [I] into V0, then copy to current_result_reg
-            emit_opcode(0xF065 | (0 << 8)); // LD V0, [I]
-
-            // Copy V0 to current_result_reg if different
-            if (current_result_reg != 0) {
-                emit_opcode(0x8000 | (current_result_reg << 8) | (0 << 4) | 0x0); // LD Vx, V0
-            }
-
-            free_register(idx_reg);
+        void CodeGenerator::visit(FunctionNode& node) {
+            // Handled by generate(); kept for interface completeness
+            build_function_ir(node);
         }
 
-        void CodeGenerator::visit(EntityFieldAssignNode& node) {
-            // Look up the entity instance
-            auto inst_it = entity_instances.find(node.entity_name);
-            if (inst_it == entity_instances.end()) {
-                errorHandler.error("Unknown entity variable: " + node.entity_name, node.line, node.column);
+        void CodeGenerator::visit(ProgramNode& node) {
+            // Handled by generate()
+            (void)node;
+        }
+
+        void CodeGenerator::emit_sprite_data(SpriteDefNode& node) {
+            sprites[node.name] = static_cast<uint16_t>(output.size());
+            sprite_heights[node.name] = node.height;
+            for (uint8_t b : node.data) emit_byte(b);
+            if (output.size() % 2 != 0) emit_byte(0x00);
+            data_regions.push_back({sprites[node.name], static_cast<uint16_t>(output.size())});
+        }
+
+        // Recursively collect sprite/table definitions (including ones nested
+        // in function bodies) into the data section
+        void CodeGenerator::collect_sprites(ASTNode* node) {
+            if (!node) return;
+            if (auto* sprite = dynamic_cast<SpriteDefNode*>(node)) {
+                emit_sprite_data(*sprite);
                 return;
             }
-
-            // Look up the entity type
-            auto type_it = entity_types.find(inst_it->second.type_name);
-            if (type_it == entity_types.end()) {
-                errorHandler.error("Unknown entity type: " + inst_it->second.type_name, node.line, node.column);
-                return;
-            }
-
-            // Find the field offset
-            int field_offset = -1;
-            for (const auto& field : type_it->second.fields) {
-                if (field.name == node.field_name) {
-                    field_offset = field.offset;
-                    break;
+            if (auto* fn = dynamic_cast<FunctionNode*>(node)) {
+                collect_sprites(fn->body.get());
+            } else if (auto* block = dynamic_cast<BlockNode*>(node)) {
+                for (auto& stmt : block->statements) collect_sprites(stmt.get());
+            } else if (auto* if_node = dynamic_cast<IfNode*>(node)) {
+                collect_sprites(if_node->then_branch.get());
+                collect_sprites(if_node->else_branch.get());
+            } else if (auto* while_node = dynamic_cast<WhileNode*>(node)) {
+                collect_sprites(while_node->body.get());
+            } else if (auto* for_node = dynamic_cast<ForNode*>(node)) {
+                collect_sprites(for_node->body.get());
+            } else if (auto* switch_node = dynamic_cast<SwitchNode*>(node)) {
+                for (auto& c : switch_node->cases) {
+                    for (auto& stmt : c.statements) collect_sprites(stmt.get());
                 }
             }
-            if (field_offset < 0) {
-                errorHandler.error("Unknown field '" + node.field_name + "' in entity '" + inst_it->second.type_name + "'", node.line, node.column);
-                return;
-            }
+        }
 
-            uint16_t base_addr = inst_it->second.base_addr;
-            int entity_size = type_it->second.size;
+        std::vector<uint8_t> CodeGenerator::generate(ProgramNode& program) {
+            output.clear();
+            labels.clear();
+            fixups.clear();
+            data_regions.clear();
+            source_map.clear();
+            function_params.clear();
+            function_returns.clear();
+            function_max_regs.clear();
+            function_spills.clear();
+            sprites.clear();
+            sprite_heights.clear();
+            arrays.clear();
+            array_sizes.clear();
+            array_dims.clear();
+            constants.clear();
+            entity_types.clear();
+            entity_instances.clear();
+            global_inits.clear();
+            next_array_addr = 0x800;
+            rom_size_warning_issued = false;
+            peephole_saved = 0;
 
-            // Evaluate value into V0
-            uint8_t val_reg = 0;
-            uint8_t saved = current_result_reg;
-            current_result_reg = val_reg;
-            node.value->accept(*this);
-            current_result_reg = saved;
+            call_graph.clear();
+            reachable_functions.clear();
+            build_call_graph(program);
+            mark_reachable("main");
 
-            // Save V0 while computing address
-            uint8_t saved_val_reg = allocate_register();
-            emit_opcode(0x8000 | (saved_val_reg << 8) | (val_reg << 4) | 0x0); // LD saved_val, V0
+            try {
+                // Entry stub: init the runtime stack pointer, call main, halt
+                emit_opcode(0x6D00);                        // LD VD, 0
+                fixups.push_back({static_cast<uint16_t>(output.size()), "main", true});
+                emit_opcode(0x2000);                        // CALL main (fixup)
+                uint16_t halt = static_cast<uint16_t>(output.size());
+                emit_opcode(0x1000 | ((0x200 + halt) & 0x0FFF)); // JP self
 
-            // Compute address offset
-            uint8_t idx_reg = allocate_register();
-
-            if (node.index) {
-                // Array access: entity[i].field = value
-                saved = current_result_reg;
-                current_result_reg = idx_reg;
-                node.index->accept(*this);
-                current_result_reg = saved;
-
-                // Multiply by entity size if > 1
-                if (entity_size > 1) {
-                    uint8_t size_reg = allocate_register();
-                    emit_opcode(0x6000 | (size_reg << 8) | (entity_size & 0xFF)); // LD size_reg, entity_size
-
-                    uint8_t temp_reg = allocate_register();
-                    emit_opcode(0x8000 | (temp_reg << 8) | (idx_reg << 4) | 0x0); // LD temp, idx
-                    emit_opcode(0x6000 | (idx_reg << 8) | 0x00); // LD idx, 0
-                    uint16_t mult_loop = static_cast<uint16_t>(output.size());
-                    emit_opcode(0x4000 | (size_reg << 8) | 0x00); // SNE size_reg, 0 - skip JP if size != 0
-                    uint16_t mult_end = output.size();
-                    emit_jump(0); // exit when size == 0
-                    emit_opcode(0x8000 | (idx_reg << 8) | (temp_reg << 4) | 0x4); // ADD idx, temp
-                    emit_opcode(0x7000 | (size_reg << 8) | 0xFF); // ADD size_reg, -1
-                    emit_jump(mult_loop);
-                    patch_jump_at(mult_end, static_cast<uint16_t>(output.size()));
-                    free_register(temp_reg);
-                    free_register(size_reg);
+                // Pass 1: declarations and data
+                for (auto& decl : program.functions) {
+                    if (auto* c = dynamic_cast<ConstDeclNode*>(decl.get())) {
+                        visit(*c);
+                    } else if (auto* e = dynamic_cast<EnumDeclNode*>(decl.get())) {
+                        visit(*e);
+                    } else if (auto* et = dynamic_cast<EntityDefNode*>(decl.get())) {
+                        visit(*et);
+                    } else if (auto* g = dynamic_cast<GlobalVarDeclNode*>(decl.get())) {
+                        if (arrays.count(g->name)) {
+                            errorHandler.error("Global variable '" + g->name + "' already declared",
+                                               g->line, g->column);
+                            continue;
+                        }
+                        arrays[g->name] = next_array_addr;
+                        array_sizes[g->name] = 1;
+                        next_array_addr += 1;
+                        if (g->initializer) global_inits.push_back(g);
+                    }
+                }
+                // Sprite/table data (top-level and nested) into the data section
+                for (auto& decl : program.functions) {
+                    collect_sprites(decl.get());
                 }
 
-                // Add field offset
-                if (field_offset > 0) {
-                    emit_opcode(0x7000 | (idx_reg << 8) | (field_offset & 0xFF)); // ADD idx_reg, field_offset
+                // Record function signatures up front (forward calls)
+                for (auto& decl : program.functions) {
+                    if (auto* fn = dynamic_cast<FunctionNode*>(decl.get())) {
+                        std::vector<std::string> names;
+                        for (const auto& p : fn->params) names.push_back(p.name);
+                        function_params[fn->name] = names;
+                        function_returns[fn->name] = fn->returns_value;
+                    }
                 }
-            } else {
-                // Single entity: just use field offset
-                emit_opcode(0x6000 | (idx_reg << 8) | (field_offset & 0xFF)); // LD idx_reg, field_offset
+
+                // Pass 2: build, allocate, and emit each reachable function
+                for (auto& decl : program.functions) {
+                    auto* fn = dynamic_cast<FunctionNode*>(decl.get());
+                    if (!fn) continue;
+                    if (!reachable_functions.count(fn->name)) continue;
+
+                    IRFunction irf;
+                    irf.name = fn->name;
+                    irf.param_count = static_cast<int>(fn->params.size());
+                    irf.returns_value = fn->returns_value;
+                    F = &irf;
+                    current_stmt_line = fn->line;
+                    current_stmt_col = fn->column;
+
+                    build_function_ir(*fn);
+
+                    // Allocate registers (spill slots live after user arrays)
+                    IRAllocator allocator;
+                    Allocation alloc;
+                    if (!allocator.run(irf, next_array_addr, alloc)) {
+                        errorHandler.error("Internal: register allocation failed for " + fn->name,
+                                           fn->line, fn->column);
+                        F = nullptr;
+                        return {};
+                    }
+                    next_array_addr = std::max(next_array_addr, alloc.spill_end);
+                    if (next_array_addr > CALLER_SAVE_BASE - 0x10) {
+                        errorHandler.error("Memory exhausted: arrays and spill slots reach the stack area",
+                                           fn->line, fn->column);
+                    }
+                    uint8_t peak = 0;
+                    for (auto& [v, p] : alloc.assignment) if (p > peak) peak = p;
+                    function_max_regs[fn->name] = peak;
+                    function_spills[fn->name] = alloc.spill_count;
+
+                    // Emit
+                    labels[fn->name] = static_cast<uint16_t>(output.size());
+                    IREmitter emitter;
+                    std::vector<IREmitter::CallFixup> call_fixups;
+                    std::vector<IREmitter::Mapping> mappings;
+                    std::string emit_error;
+                    emitter.emit(irf, alloc, output, call_fixups, mappings, emit_error);
+                    if (!emit_error.empty()) {
+                        errorHandler.error(emit_error, fn->line, fn->column);
+                        F = nullptr;
+                        return {};
+                    }
+                    for (const auto& cf : call_fixups) {
+                        fixups.push_back({cf.address, cf.name, true});
+                    }
+                    for (const auto& m : mappings) {
+                        source_map.addMapping(static_cast<uint16_t>(0x200 + m.offset), m.line, m.col);
+                    }
+                    F = nullptr;
+                }
+
+                // ROM size checks
+                if (output.size() > MAX_ROM_SIZE) {
+                    errorHandler.error("ROM size exceeds CHIP-8 limit of 3072 bytes (" +
+                                       std::to_string(output.size()) + " bytes)", 0, 0);
+                } else if (output.size() > ROM_WARNING_THRESHOLD && !rom_size_warning_issued) {
+                    errorHandler.warning("ROM size is at " +
+                                         std::to_string(output.size() * 100 / MAX_ROM_SIZE) +
+                                         "% capacity (" + std::to_string(output.size()) + "/" +
+                                         std::to_string(MAX_ROM_SIZE) + " bytes)", 0, 0);
+                    rom_size_warning_issued = true;
+                }
+
+                // Peephole (adjusts labels, fixups, data regions, source map)
+                peephole_saved = peephole_enabled ? peephole_optimize() : 0;
+
+                // Resolve function-call fixups
+                for (const auto& fixup : fixups) {
+                    auto it = labels.find(fixup.label);
+                    if (it != labels.end()) {
+                        uint16_t target_addr = 0x200 + it->second;
+                        uint16_t opcode = (fixup.is_call ? 0x2000 : 0x1000) | (target_addr & 0x0FFF);
+                        output[fixup.address]     = static_cast<uint8_t>((opcode >> 8) & 0xFF);
+                        output[fixup.address + 1] = static_cast<uint8_t>(opcode & 0xFF);
+                    } else {
+                        errorHandler.error("Undefined function: " + fixup.label, 0, 0);
+                    }
+                }
+
+                return output;
+            } catch (const std::exception& e) {
+                errorHandler.error(std::string("Code generation failed: ") + e.what(), 0, 0);
+                F = nullptr;
+                return {};
             }
-
-            // Restore value to V0
-            emit_opcode(0x8000 | (val_reg << 8) | (saved_val_reg << 4) | 0x0); // LD V0, saved_val
-            free_register(saved_val_reg);
-
-            // Load I = base_addr
-            emit_opcode(0xA000 | (base_addr & 0x0FFF)); // LD I, base_addr
-
-            // Add index to I
-            emit_opcode(0xF01E | (idx_reg << 8)); // ADD I, idx_reg
-
-            // Store V0 at [I]
-            emit_opcode(0xF055 | (0 << 8)); // LD [I], V0
-
-            free_register(idx_reg);
         }
 
         // Dead code elimination: build call graph from AST
@@ -2564,3 +1701,4 @@
             return bytes_saved;
         }
     }
+}

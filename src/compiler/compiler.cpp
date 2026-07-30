@@ -154,11 +154,17 @@ void Compiler::compile(const std::string &source_file, const std::string &output
                 std::cout << "const folds:  " << optimizer.getConstantsFolded() << "\n";
             }
             std::cout << "register peaks per function (of 13 usable):\n";
+            const auto& spills = codeGen->getFunctionSpills();
             for (const auto& [name, peak] : codeGen->getFunctionRegisterPeaks()) {
                 int shown = peak;
                 if (shown == 0xE) shown = 13;      // VE counts as the 13th
                 else if (shown > 12) shown = 12;
-                std::cout << "  " << name << ": " << shown << "\n";
+                std::cout << "  " << name << ": " << shown;
+                auto sit = spills.find(name);
+                if (sit != spills.end() && sit->second > 0) {
+                    std::cout << " (+" << sit->second << " spilled to memory)";
+                }
+                std::cout << "\n";
             }
         }
 
