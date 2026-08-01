@@ -560,3 +560,24 @@ TEST(BehaviorTest, ConditionalInitInsideLoop) {
     EXPECT_EQ(globalAt(emu, 0), 16);
     EXPECT_EQ(globalAt(emu, 1), 32);
 }
+
+// Ring-buffer pattern used by snake: byte indices wrap 255 -> 0 through a
+// 256-entry array
+TEST(BehaviorTest, RingBufferByteWrap) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1;"
+        "void main() {"
+        "  byte ring[256];"
+        "  byte head; byte i;"
+        "  head = 250;"
+        "  for (i = 0; i < 20; i++) {"
+        "    head = head + 1;"          // wraps 255 -> 0 mid-loop
+        "    ring[head] = i;"
+        "  }"
+        "  g0 = ring[14];"              // last write: i=19 at head=14
+        "  g1 = ring[255];"             // i=4 landed on the wrap boundary
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 19);
+    EXPECT_EQ(globalAt(emu, 1), 4);
+}

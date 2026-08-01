@@ -3,15 +3,16 @@
 // Demonstrates: incremental XOR drawing, circular-buffer body, draw-collision
 //
 // The snake lives on a 2x2 pixel grid: the sprite is 2x2 so what you see is
-// exactly what collides. The body is a ring buffer - each move draws the new
-// head and erases the old tail, so a frame costs a handful of instructions
-// no matter how long the snake gets.
+// exactly what collides. The body is a 256-entry ring buffer - byte indices
+// wrap around it naturally, each move draws the new head and erases the old
+// tail, so a frame costs a handful of instructions no matter how long the
+// snake gets (up to 250 segments - about half the board).
 
 sprite dot[2] = { 0xC0, 0xC0 };
 
 void main() {
-    byte bodyx[32];
-    byte bodyy[32];
+    byte bodyx[256];
+    byte bodyy[256];
     byte head;
     byte tail;
     byte len;
@@ -70,7 +71,7 @@ void main() {
         nx = nx & 63;
         ny = ny & 31;
 
-        head = (head + 1) & 31;
+        head = head + 1;   // byte wrap == ring wrap
         bodyx[head] = nx;
         bodyy[head] = ny;
 
@@ -81,12 +82,12 @@ void main() {
             score++;
             drawnum(score, 0, 0);
             beep(3);
-            if (len < 30) {
+            if (len < 250) {
                 len++;
             } else {
                 // At max length: keep moving the tail
                 draw(bodyx[tail], bodyy[tail], 2, dot);
-                tail = (tail + 1) & 31;
+                tail = tail + 1;
             }
             fx = rand(31) * 2;
             fy = rand(15) * 2;
@@ -99,7 +100,7 @@ void main() {
             }
         } else {
             draw(bodyx[tail], bodyy[tail], 2, dot);
-            tail = (tail + 1) & 31;
+            tail = tail + 1;   // byte wrap == ring wrap
         }
 
         // Draw the new head; a collision here means we bit ourselves
