@@ -3,12 +3,15 @@
 // Demonstrates: incremental XOR drawing, circular-buffer body, draw-collision
 //
 // The snake lives on a 2x2 pixel grid: the sprite is 2x2 so what you see is
-// exactly what collides. The body is a 256-entry ring buffer - byte indices
+// exactly what collides. The top 6 rows are a HUD (score + separator) that
+// the snake wraps around, so the playfield and display never interact.
+// The body is a 256-entry ring buffer - byte indices
 // wrap around it naturally, each move draws the new head and erases the old
 // tail, so a frame costs a handful of instructions no matter how long the
 // snake gets (up to 250 segments - about half the board).
 
 sprite dot[2] = { 0xC0, 0xC0 };
+sprite bar[1] = { 0xFF };
 
 void main() {
     byte bodyx[256];
@@ -36,15 +39,19 @@ void main() {
             draw(30, 16, 2, dot);
             draw(32, 16, 2, dot);
             drawnum(score, 0, 0);
+            draw(0, 5, 1, bar);  draw(8, 5, 1, bar);
+            draw(16, 5, 1, bar); draw(24, 5, 1, bar);
+            draw(32, 5, 1, bar); draw(40, 5, 1, bar);
+            draw(48, 5, 1, bar); draw(56, 5, 1, bar);
 
             // Spawn food somewhere that isn't the snake
             fx = rand(31) * 2;
-            fy = rand(15) * 2;
+            fy = rand(255) % 13 * 2 + 6;   // playfield rows 6..30
             draw(fx, fy, 2, dot);
             while (collision) {
                 draw(fx, fy, 2, dot);    // undo the bad spawn
                 fx = rand(31) * 2;
-                fy = rand(15) * 2;
+                fy = rand(255) % 13 * 2 + 6;
                 draw(fx, fy, 2, dot);
             }
         }
@@ -69,7 +76,8 @@ void main() {
             case 3: nx -= 2;
         }
         nx = nx & 63;
-        ny = ny & 31;
+        if (ny < 6)  { ny = 30; }   // wrap within the playfield,
+        if (ny > 30) { ny = 6; }    // below the score bar
 
         head = head + 1;   // byte wrap == ring wrap
         bodyx[head] = nx;
@@ -90,12 +98,12 @@ void main() {
                 tail = tail + 1;
             }
             fx = rand(31) * 2;
-            fy = rand(15) * 2;
+            fy = rand(255) % 13 * 2 + 6;   // playfield rows 6..30
             draw(fx, fy, 2, dot);
             while (collision) {
                 draw(fx, fy, 2, dot);
                 fx = rand(31) * 2;
-                fy = rand(15) * 2;
+                fy = rand(255) % 13 * 2 + 6;
                 draw(fx, fy, 2, dot);
             }
         } else {
