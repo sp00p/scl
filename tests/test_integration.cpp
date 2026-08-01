@@ -536,3 +536,27 @@ TEST(BehaviorTest, SpillsSurviveLoopsAndCalls) {
     EXPECT_EQ(globalAt(emu, 0), 84);
     EXPECT_EQ(globalAt(emu, 1), 30);
 }
+
+// Regression: values initialized under a conditional INSIDE a loop (the
+// snake restart pattern) are loop-carried and must keep their registers
+// across iterations even though their first in-loop occurrence is a write.
+TEST(BehaviorTest, ConditionalInitInsideLoop) {
+    HeadlessEmulator emu;
+    compileAndRun(emu,
+        "global byte g0; global byte g1;"
+        "void main() {"
+        "  byte restart; byte a; byte b; byte i; byte t1; byte t2; byte t3;"
+        "  restart = 1; i = 0;"
+        "  while (i < 6) {"
+        "    if (restart == 1) { restart = 0; a = 10; b = 20; }"
+        "    t1 = i * 3; t2 = t1 + i; t3 = t2 * 2;"  // temp churn for pressure
+        "    a = a + 1;"
+        "    b = b + t3 - t3 + 2;"
+        "    i++;"
+        "  }"
+        "  g0 = a;"   // 16
+        "  g1 = b;"   // 32
+        "}");
+    EXPECT_EQ(globalAt(emu, 0), 16);
+    EXPECT_EQ(globalAt(emu, 1), 32);
+}

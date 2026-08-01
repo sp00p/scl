@@ -123,20 +123,41 @@ void IRAllocator::compute_intervals(const IRFunction& fn, std::vector<Interval>&
         }
     }
 
-    // A vreg needs whole-loop extension only when its value must survive
-    // the back edge: it starts before the loop (defined outside, used in),
-    // or its first occurrence inside the loop is a READ (loop-carried).
-    // Values that are defined-before-use within each iteration (including
-    // spill reload temps) need no extension - this is what keeps spill
-    // rounds convergent.
+    // Sorted label positions for the dominance check below
+    std::vector<int> label_positions;
+    for (size_t i = 0; i < fn.insts.size(); i++) {
+        if (fn.insts[i].op == IROp::Label) label_positions.push_back(static_cast<int>(i));
+    }
+
+    // A vreg needs whole-loop extension when its value can survive the back
+    // edge: it starts before the loop, its first in-loop occurrence is a
+    // read (loop-carried), or its first in-loop write does NOT dominate the
+    // later occurrences. Dominance is approximated linearly: if any label
+    // sits between the write and the last in-loop occurrence, control can
+    // enter past the write (e.g. a conditional init like
+    // 'if (restart) { head = 2; }' inside the game loop), so the value may
+    // flow from the previous iteration and must stay live for the whole
+    // loop. Spill reload/store pairs are adjacent with no label between
+    // them, so they are never extended - which keeps spill rounds
+    // convergent.
     auto needs_extension = [&](const Interval& iv, int to, int from) {
         if (iv.start < to) return true;
         auto oit = occurrences.find(iv.vreg);
         if (oit == occurrences.end()) return false;
+        int first_idx = -1;
+        bool first_is_read = false;
+        int last_idx = -1;
         for (const auto& [idx, is_read] : oit->second) {
-            if (idx >= to && idx <= from) return is_read;
+            if (idx < to || idx > from) continue;
+            if (first_idx < 0) { first_idx = idx; first_is_read = is_read; }
+            last_idx = idx;
         }
-        return false;
+        if (first_idx < 0) return false;
+        if (first_is_read) return true;
+        // Any label strictly between the first write and the last occurrence
+        // means the write may be bypassed while the uses still execute
+        auto lo = std::upper_bound(label_positions.begin(), label_positions.end(), first_idx);
+        return lo != label_positions.end() && *lo <= last_idx;
     };
 
     bool changed = true;
