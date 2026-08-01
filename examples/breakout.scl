@@ -1,51 +1,63 @@
 // Breakout
 // Controls: A/D (keys 7/9) to move paddle
-// Demonstrates: arrays, collision detection, game state
+// Demonstrates: incremental XOR drawing (draw once, then erase/redraw only
+// what moved) - this keeps frames cheap enough to play smoothly on any
+// CHIP-8 emulator, even at low instruction-per-frame settings.
 
 sprite paddle[1] = { 0xFC };
-sprite ball[1] = { 0xC0 };
-sprite brick[1] = { 0xF0 };
+sprite ball[1]   = { 0xC0 };
+sprite brick[1]  = { 0xF0 };
 
 void main() {
     byte bricks[16];  // 16 bricks (2 rows of 8)
     byte px = 28;     // Paddle position
+    byte oldpx;
     byte bx = 32;     // Ball x
     byte by = 20;     // Ball y
     byte dx = 1;      // Ball velocity x
     byte dy = 255;    // Ball velocity y (255 = -1 when wrapped)
     byte score = 0;
     byte i;
+    byte row;
+    byte col;
     byte brickx;
     byte bricky;
-    
-    // Initialize all bricks as active
+
+    clear;
     for (i = 0; i < 16; i++) {
         bricks[i] = 1;
+        brickx = (i % 8) * 8 + 2;
+        bricky = (i / 8) * 3 + 8;    // brick band at y 8-13
+        draw(brickx, bricky, 1, brick);
     }
-    
+    draw(px, 28, 1, paddle);
+    draw(bx, by, 1, ball);
+    drawnum(score, 0, 0);
+
     while (1) {
-        clear;
-        
-        // Paddle input
+        oldpx = px;
         if (key(7)) { px -= 2; }  // A = left
         if (key(9)) { px += 2; }  // D = right
         if (px < 2) { px = 2; }
         if (px > 56) { px = 56; }
-        
-        // Ball movement
+        if (px != oldpx) {
+            draw(oldpx, 28, 1, paddle);
+            draw(px, 28, 1, paddle);
+        }
+
+        // Ball: erase at old position, move, then redraw below
+        draw(bx, by, 1, ball);
         bx += dx;
         by += dy;
-        
-        // Ball bounce off walls
-        if (bx < 2) { bx = 2; dx = 0 - dx; }
-        if (bx > 60) { bx = 60; dx = 0 - dx; }
-        if (by < 2) { by = 2; dy = 0 - dy; }
-        
-        // Ball bounce off paddle
+
+        if (bx < 2)  { bx = 2;  dx = -dx; }
+        if (bx > 60) { bx = 60; dx = -dx; }
+        if (by < 6)  { by = 6;  dy = -dy; }
+
         if (by > 26) {
             if (bx >= px && bx < px + 6) {
                 by = 26;
-                dy = 0 - dy;
+                dy = -dy;
                 beep(2);
             } else if (by > 30) {
                 // Ball lost - reset
@@ -55,42 +67,39 @@ void main() {
                 beep(10);
             }
         }
-        
-        // Check brick collisions
-        for (i = 0; i < 16; i++) {
-            if (bricks[i] == 1) {
-                // Calculate brick position
-                brickx = (i & 7) * 8 + 2;
-                bricky = (i / 8) * 3 + 2;
-                
-                // Check collision
-                if (bx >= brickx && bx < brickx + 4) {
-                    if (by >= bricky && by < bricky + 2) {
-                        bricks[i] = 0;
-                        dy = 0 - dy;
-                        score++;
-                        beep(4);
+
+        // Brick collision: the ball's cell is computed directly (no loop)
+        if (by >= 8 && by < 13 && bx >= 2 && bx < 66) {
+            row = (by - 8) / 3;
+            col = (bx - 2) / 8;
+            bricky = row * 3 + 8;
+            brickx = col * 8 + 2;
+            if (by < bricky + 2 && bx >= brickx && bx < brickx + 4) {
+                i = row * 8 + col;
+                if (bricks[i] == 1) {
+                    bricks[i] = 0;
+                    draw(brickx, bricky, 1, brick);
+                    dy = -dy;
+                    drawnum(score, 0, 0);
+                    score++;
+                    drawnum(score, 0, 0);
+                    beep(4);
+                    if (score == 16) {
+                        for (i = 0; i < 16; i++) {
+                            bricks[i] = 1;
+                            brickx = (i % 8) * 8 + 2;
+                            bricky = (i / 8) * 3 + 8;
+                            draw(brickx, bricky, 1, brick);
+                        }
+                        drawnum(score, 0, 0);
+                        score = 0;
+                        drawnum(score, 0, 0);
                     }
                 }
             }
         }
-        
-        // Draw bricks
-        for (i = 0; i < 16; i++) {
-            if (bricks[i] == 1) {
-                brickx = (i & 7) * 8 + 2;
-                bricky = (i / 8) * 3 + 2;
-                draw(brickx, bricky, 1, brick);
-            }
-        }
-        
-        // Draw paddle and ball
-        draw(px, 28, 1, paddle);
+
         draw(bx, by, 1, ball);
-        
-        // Draw score
-        drawnum(score, 0, 0);
-        
         wait(16);
     }
 }

@@ -1,6 +1,6 @@
 // Pong - Single Player vs Wall
 // Controls: W/S (keys 5/8) to move paddle
-// Demonstrates: functions, collision, game loop
+// Demonstrates: incremental XOR drawing, functions, collision, game loop
 
 sprite paddle[6] = { 0x80, 0x80, 0x80, 0x80, 0x80, 0x80 };
 sprite ball[2] = { 0xC0, 0xC0 };
@@ -14,47 +14,55 @@ byte clamp(byte val, byte min, byte max) {
 void main() {
     byte px = 2;      // Paddle x (fixed)
     byte py = 13;     // Paddle y
+    byte oldpy;
     byte bx = 32;     // Ball x
     byte by = 16;     // Ball y
     byte dx = 2;      // Ball velocity x
     byte dy = 1;      // Ball velocity y
     byte score = 0;
-    
+
+    clear;
+    draw(px, py, 6, paddle);
+    draw(bx, by, 2, ball);
+    drawnum(score, 44, 0);
+
     while (1) {
-        clear;
-        
-        // Paddle input
+        oldpy = py;
         if (key(5)) { py -= 2; }  // W = up
         if (key(8)) { py += 2; }  // S = down
         py = clamp(py, 0, 26);
-        
-        // Ball movement
+        if (py != oldpy) {
+            draw(px, oldpy, 6, paddle);
+            draw(px, py, 6, paddle);
+        }
+
+        // Ball: erase, move, redraw
+        draw(bx, by, 2, ball);
         bx += dx;
         by += dy;
-        
-        // Ball bounce off top/bottom
+
         if (by < 1) {
             by = 1;
-            dy = 0 - dy;
+            dy = -dy;
         }
         if (by > 29) {
             by = 29;
-            dy = 0 - dy;
+            dy = -dy;
         }
-        
-        // Ball bounce off right wall
+
         if (bx > 60) {
             bx = 60;
-            dx = 0 - dx;
+            dx = -dx;
             beep(2);
         }
-        
-        // Ball collision with paddle
+
         if (bx < 5) {
             if (by >= py && by < py + 6) {
                 bx = 5;
-                dx = 0 - dx;
+                dx = -dx;
+                drawnum(score, 44, 0);
                 score++;
+                drawnum(score, 44, 0);
                 beep(4);
             } else {
                 // Missed - reset ball
@@ -64,12 +72,8 @@ void main() {
                 beep(10);
             }
         }
-        
-        // Draw
-        draw(px, py, 6, paddle);
+
         draw(bx, by, 2, ball);
-        drawnum(score, 28, 0);
-        
         wait(16);
     }
 }

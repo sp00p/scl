@@ -1,31 +1,39 @@
 // Snake Game
 // Controls: WASD (keys 5/7/8/9)
-// Demonstrates: arrays, switch, &&, else-if, collision
+// Demonstrates: incremental XOR drawing, arrays, switch, &&, else-if
 
 sprite dot[1] = { 0xF0 };
 
 void main() {
     byte x[5];       // Snake body x positions
-    byte y[5];       // Snake body y positions  
+    byte y[5];       // Snake body y positions
     byte len = 3;    // Snake length
     byte dir = 1;    // Direction: 0=up, 1=right, 2=down, 3=left
     byte fx;         // Food position
     byte fy;
     byte score = 0;
-    byte alive = 1;
-    
+    byte tailx;
+    byte taily;
+    byte grew;
+
     // Initial snake position
     x[0] = 32; y[0] = 16;
     x[1] = 30; y[1] = 16;
     x[2] = 28; y[2] = 16;
-    
+
     // Spawn food at random position
     fx = rand(31) * 2;
     fy = rand(15) * 2;
-    
-    while (alive == 1) {
-        clear;
-        
+
+    // --- Draw the initial state once ---
+    clear;
+    draw(x[0], y[0], 1, dot);
+    draw(x[1], y[1], 1, dot);
+    draw(x[2], y[2], 1, dot);
+    draw(fx, fy, 1, dot);
+    drawnum(score, 0, 0);
+
+    while (1) {
         // Handle input - prevent reversing direction
         if (key(5)) {
             if (dir != 2) { dir = 0; }  // W = up
@@ -36,13 +44,17 @@ void main() {
         } else if (key(9)) {
             if (dir != 3) { dir = 1; }  // D = right
         }
-        
+
+        // Remember the tail before shifting (it gets erased unless we grow)
+        tailx = x[len - 1];
+        taily = y[len - 1];
+
         // Shift body segments
         x[4] = x[3]; y[4] = y[3];
         x[3] = x[2]; y[3] = y[2];
         x[2] = x[1]; y[2] = y[1];
         x[1] = x[0]; y[1] = y[0];
-        
+
         // Move head based on direction
         switch (dir) {
             case 0: y[0] -= 2;
@@ -50,33 +62,32 @@ void main() {
             case 2: y[0] += 2;
             case 3: x[0] -= 2;
         }
-        
+
         // Wrap at screen edges
         x[0] = x[0] & 63;
         y[0] = y[0] & 31;
-        
+
         // Check food collision
+        grew = 0;
         if (x[0] == fx && y[0] == fy) {
+            drawnum(score, 0, 0);
             score++;
-            if (len < 5) { len++; }
+            drawnum(score, 0, 0);
+            if (len < 5) { len++; grew = 1; }
+            draw(fx, fy, 1, dot);
             fx = rand(31) * 2;
             fy = rand(15) * 2;
+            draw(fx, fy, 1, dot);        // draw new food
             beep(3);
         }
-        
-        // Draw snake body
+
+        // Incremental update: erase the old tail (unless we grew), draw the
+        // new head. Everything in between is already on screen.
+        if (grew == 0) {
+            draw(tailx, taily, 1, dot);
+        }
         draw(x[0], y[0], 1, dot);
-        draw(x[1], y[1], 1, dot);
-        if (len > 2) { draw(x[2], y[2], 1, dot); }
-        if (len > 3) { draw(x[3], y[3], 1, dot); }
-        if (len > 4) { draw(x[4], y[4], 1, dot); }
-        
-        // Draw food
-        draw(fx, fy, 1, dot);
-        
-        // Show score
-        drawnum(score, 0, 0);
-        
+
         wait(80);
     }
 }

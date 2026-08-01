@@ -776,7 +776,11 @@ game.scl:42:5: warning: Unreachable code after return/break/continue
 
 1. **Use `wait()` in loops** - Controls speed and reduces flicker
 2. **Check `collision` after `draw()`** - For hit detection
-3. **Use `clear` before drawing** - Avoids XOR ghosting
+3. **Draw incrementally** - Draw the scene once, then XOR-erase and redraw
+   only what moved each frame (drawing a sprite at the same spot erases it).
+   Clearing and redrawing everything per frame costs thousands of
+   instructions and turns into a slideshow on emulators with low
+   instructions-per-frame settings. See breakout.scl/pong.scl/snake.scl.
 4. **Clamp coordinates** - x: 0-63, y: 0-31 (or they wrap)
 5. **Use constants** - Makes code readable and easy to tune
 6. **Keep functions small** - Reduces register pressure
