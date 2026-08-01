@@ -1,39 +1,53 @@
 // Snake Game
 // Controls: WASD (keys 5/7/8/9)
-// Demonstrates: incremental XOR drawing, arrays, switch, &&, else-if
+// Demonstrates: incremental XOR drawing, circular-buffer body, draw-collision
+//
+// The snake lives on a 2x2 pixel grid: the sprite is 2x2 so what you see is
+// exactly what collides. The body is a ring buffer - each move draws the new
+// head and erases the old tail, so a frame costs a handful of instructions
+// no matter how long the snake gets.
 
-sprite dot[1] = { 0xF0 };
+sprite dot[2] = { 0xC0, 0xC0 };
 
 void main() {
-    byte x[5];       // Snake body x positions
-    byte y[5];       // Snake body y positions
-    byte len = 3;    // Snake length
-    byte dir = 1;    // Direction: 0=up, 1=right, 2=down, 3=left
-    byte fx;         // Food position
+    byte bodyx[32];
+    byte bodyy[32];
+    byte head;
+    byte tail;
+    byte len;
+    byte dir;        // 0=up, 1=right, 2=down, 3=left
+    byte fx;
     byte fy;
-    byte score = 0;
-    byte tailx;
-    byte taily;
-    byte grew;
-
-    // Initial snake position
-    x[0] = 32; y[0] = 16;
-    x[1] = 30; y[1] = 16;
-    x[2] = 28; y[2] = 16;
-
-    // Spawn food at random position
-    fx = rand(31) * 2;
-    fy = rand(15) * 2;
-
-    // --- Draw the initial state once ---
-    clear;
-    draw(x[0], y[0], 1, dot);
-    draw(x[1], y[1], 1, dot);
-    draw(x[2], y[2], 1, dot);
-    draw(fx, fy, 1, dot);
-    drawnum(score, 0, 0);
+    byte score;
+    byte nx;
+    byte ny;
+    byte restart = 1;
 
     while (1) {
+        if (restart == 1) {
+            restart = 0;
+            clear;
+            head = 2; tail = 0; len = 3; dir = 1; score = 0;
+            bodyx[0] = 28; bodyy[0] = 16;
+            bodyx[1] = 30; bodyy[1] = 16;
+            bodyx[2] = 32; bodyy[2] = 16;
+            draw(28, 16, 2, dot);
+            draw(30, 16, 2, dot);
+            draw(32, 16, 2, dot);
+            drawnum(score, 0, 0);
+
+            // Spawn food somewhere that isn't the snake
+            fx = rand(31) * 2;
+            fy = rand(15) * 2;
+            draw(fx, fy, 2, dot);
+            while (collision) {
+                draw(fx, fy, 2, dot);    // undo the bad spawn
+                fx = rand(31) * 2;
+                fy = rand(15) * 2;
+                draw(fx, fy, 2, dot);
+            }
+        }
+
         // Handle input - prevent reversing direction
         if (key(5)) {
             if (dir != 2) { dir = 0; }  // W = up
@@ -45,49 +59,57 @@ void main() {
             if (dir != 3) { dir = 1; }  // D = right
         }
 
-        // Remember the tail before shifting (it gets erased unless we grow)
-        tailx = x[len - 1];
-        taily = y[len - 1];
-
-        // Shift body segments
-        x[4] = x[3]; y[4] = y[3];
-        x[3] = x[2]; y[3] = y[2];
-        x[2] = x[1]; y[2] = y[1];
-        x[1] = x[0]; y[1] = y[0];
-
-        // Move head based on direction
+        nx = bodyx[head];
+        ny = bodyy[head];
         switch (dir) {
-            case 0: y[0] -= 2;
-            case 1: x[0] += 2;
-            case 2: y[0] += 2;
-            case 3: x[0] -= 2;
+            case 0: ny -= 2;
+            case 1: nx += 2;
+            case 2: ny += 2;
+            case 3: nx -= 2;
         }
+        nx = nx & 63;
+        ny = ny & 31;
 
-        // Wrap at screen edges
-        x[0] = x[0] & 63;
-        y[0] = y[0] & 31;
+        head = (head + 1) & 31;
+        bodyx[head] = nx;
+        bodyy[head] = ny;
 
-        // Check food collision
-        grew = 0;
-        if (x[0] == fx && y[0] == fy) {
+        if (nx == fx && ny == fy) {
+            // Ate the food: erase it, grow (skip the tail erase), respawn
+            draw(fx, fy, 2, dot);
             drawnum(score, 0, 0);
             score++;
             drawnum(score, 0, 0);
-            if (len < 5) { len++; grew = 1; }
-            draw(fx, fy, 1, dot);
+            beep(3);
+            if (len < 30) {
+                len++;
+            } else {
+                // At max length: keep moving the tail
+                draw(bodyx[tail], bodyy[tail], 2, dot);
+                tail = (tail + 1) & 31;
+            }
             fx = rand(31) * 2;
             fy = rand(15) * 2;
-            draw(fx, fy, 1, dot);        // draw new food
-            beep(3);
+            draw(fx, fy, 2, dot);
+            while (collision) {
+                draw(fx, fy, 2, dot);
+                fx = rand(31) * 2;
+                fy = rand(15) * 2;
+                draw(fx, fy, 2, dot);
+            }
+        } else {
+            draw(bodyx[tail], bodyy[tail], 2, dot);
+            tail = (tail + 1) & 31;
         }
 
-        // Incremental update: erase the old tail (unless we grew), draw the
-        // new head. Everything in between is already on screen.
-        if (grew == 0) {
-            draw(tailx, taily, 1, dot);
+        // Draw the new head; a collision here means we bit ourselves
+        draw(nx, ny, 2, dot);
+        if (collision) {
+            beep(30);
+            wait(1000);
+            restart = 1;
         }
-        draw(x[0], y[0], 1, dot);
 
-        wait(80);
+        wait(100);
     }
 }
