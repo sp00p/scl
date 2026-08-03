@@ -31,7 +31,7 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libxext-dev
+        sudo apt-get install -y libxext-dev libasound2-dev libpulse-dev
     
     - name: Configure CMake
       run: cmake -B build -DCMAKE_BUILD_TYPE=Release

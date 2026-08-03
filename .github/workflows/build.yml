@@ -22,8 +22,11 @@ jobs:
       run: cmake --build build --config Release
     
     - name: Run Tests
+      env:
+        SDL_VIDEODRIVER: dummy
+        SDL_AUDIODRIVER: dummy
       run: ctest --test-dir build -C Release --output-on-failure
-    
+
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -44,17 +47,20 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libxext-dev
-    
+        sudo apt-get install -y libxext-dev libasound2-dev libpulse-dev
+
     - name: Configure CMake
       run: cmake -B build -DCMAKE_BUILD_TYPE=Release
-    
+
     - name: Build
       run: cmake --build build --config Release
-    
+
     - name: Run Tests
+      env:
+        SDL_VIDEODRIVER: dummy
+        SDL_AUDIODRIVER: dummy
       run: ctest --test-dir build -C Release --output-on-failure
-    
+
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -78,8 +84,11 @@ jobs:
       run: cmake --build build --config Release
     
     - name: Run Tests
+      env:
+        SDL_VIDEODRIVER: dummy
+        SDL_AUDIODRIVER: dummy
       run: ctest --test-dir build -C Release --output-on-failure
-    
+
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
